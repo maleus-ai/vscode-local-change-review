@@ -2,9 +2,17 @@
   "name": "local-change-review",
   "displayName": "Local Change Review",
   "description": "Review local (uncommitted) changes with GitHub-PR-style inline comments, organised into review sessions, exportable as Markdown or JSON for handing to an LLM.",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "publisher": "shiranuit",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maleus-ai/vscode-local-change-review.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maleus-ai/vscode-local-change-review/issues"
+  },
+  "homepage": "https://github.com/maleus-ai/vscode-local-change-review#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -121,12 +129,6 @@
         "category": "Local Review"
       },
       {
-        "command": "localReview.replyToComment",
-        "title": "Reply to Thread",
-        "category": "Local Review",
-        "icon": "$(reply)"
-      },
-      {
         "command": "localReview.editComment",
         "title": "Edit Comment",
         "category": "Local Review",
@@ -181,6 +183,18 @@
       {
         "command": "localReview.copyCommentJson",
         "title": "Copy Comment as JSON",
+        "category": "Local Review",
+        "icon": "$(json)"
+      },
+      {
+        "command": "localReview.copyFileMarkdown",
+        "title": "Copy File's Threads as Markdown",
+        "category": "Local Review",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "localReview.copyFileJson",
+        "title": "Copy File's Threads as JSON",
         "category": "Local Review",
         "icon": "$(json)"
       },
@@ -240,7 +254,7 @@
       },
       {
         "command": "localReview.refresh",
-        "title": "Refresh",
+        "title": "Redraw Comment Threads",
         "category": "Local Review",
         "icon": "$(refresh)"
       },
@@ -249,6 +263,30 @@
         "title": "Go to Review Comment",
         "category": "Local Review",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "localReview.suspend",
+        "title": "Suspend Local Review",
+        "category": "Local Review",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "localReview.resume",
+        "title": "Resume Local Review",
+        "category": "Local Review",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "localReview.diagnostics",
+        "title": "Show Diagnostics",
+        "category": "Local Review",
+        "icon": "$(info)"
+      },
+      {
+        "command": "localReview.showLog",
+        "title": "Show Log",
+        "category": "Local Review",
+        "icon": "$(output)"
       },
       {
         "command": "localReview.showCommentsPanel",
@@ -346,15 +384,27 @@
           "when": "false"
         },
         {
-          "command": "localReview.replyToComment",
+          "command": "localReview.suspend",
+          "when": "!localReview.suspended"
+        },
+        {
+          "command": "localReview.resume",
+          "when": "localReview.suspended"
+        },
+        {
+          "command": "localReview.copyFileMarkdown",
+          "when": "false"
+        },
+        {
+          "command": "localReview.copyFileJson",
           "when": "false"
         }
       ],
       "editor/context": [
         {
           "command": "localReview.commentOnSelection",
-          "group": "1_modification@100",
-          "when": "editorTextFocus && resourceScheme == file"
+          "when": "editorTextFocus && resourceScheme == file && localReview.enabled",
+          "group": "1_modification@100"
         }
       ],
       "view/title": [
@@ -407,6 +457,21 @@
           "command": "localReview.openStorageFolder",
           "when": "view == localReview.sessions",
           "group": "3_misc@2"
+        },
+        {
+          "command": "localReview.suspend",
+          "when": "view == localReview.sessions && !localReview.suspended",
+          "group": "3_misc@0"
+        },
+        {
+          "command": "localReview.resume",
+          "when": "view == localReview.sessions && localReview.suspended",
+          "group": "3_misc@0"
+        },
+        {
+          "command": "localReview.showLog",
+          "when": "view == localReview.sessions",
+          "group": "3_misc@3"
         }
       ],
       "view/item/context": [
@@ -474,6 +539,26 @@
           "command": "localReview.deleteSession",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
           "group": "9_danger@1"
+        },
+        {
+          "command": "localReview.copyFileMarkdown",
+          "when": "view == localReview.sessions && viewItem == file",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.copyFileJson",
+          "when": "view == localReview.sessions && viewItem == file",
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.copyFileMarkdown",
+          "when": "view == localReview.sessions && viewItem == file",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "localReview.copyFileJson",
+          "when": "view == localReview.sessions && viewItem == file",
+          "group": "1_copy@2"
         },
         {
           "command": "localReview.copyThreadMarkdown",
@@ -583,88 +668,36 @@
           "when": "commentController == localChangeReview && !commentThreadIsEmpty"
         }
       ],
-      "comments/commentThread/title": [
-        {
-          "command": "localReview.copyThreadMarkdown",
-          "group": "inline@1",
-          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
-        },
-        {
-          "command": "localReview.resolveThread",
-          "group": "inline@2",
-          "when": "commentController == localChangeReview && commentThread =~ /\\bopen\\b/"
-        },
-        {
-          "command": "localReview.unresolveThread",
-          "group": "inline@2",
-          "when": "commentController == localChangeReview && commentThread =~ /\\bresolved\\b/"
-        },
-        {
-          "command": "localReview.collapseThread",
-          "group": "inline@3",
-          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
-        },
-        {
-          "command": "localReview.copyThreadJson",
-          "group": "1_copy@1",
-          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
-        },
-        {
-          "command": "localReview.copyAllMarkdown",
-          "group": "1_copy@2",
-          "when": "commentController == localChangeReview"
-        },
-        {
-          "command": "localReview.copyAllJson",
-          "group": "1_copy@3",
-          "when": "commentController == localChangeReview"
-        },
-        {
-          "command": "localReview.deleteThread",
-          "group": "9_danger@1",
-          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
-        }
-      ],
       "comments/comment/title": [
-        {
-          "command": "localReview.replyToComment",
-          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@1"
-        },
         {
           "command": "localReview.editComment",
           "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@2"
-        },
-        {
-          "command": "localReview.copyCommentMarkdown",
-          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@3"
-        },
-        {
-          "command": "localReview.copyCommentJson",
-          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@4"
-        },
-        {
-          "command": "localReview.resolveThread",
-          "when": "commentController == localChangeReview && comment =~ /\\bopen\\b/",
-          "group": "group@5"
-        },
-        {
-          "command": "localReview.unresolveThread",
-          "when": "commentController == localChangeReview && comment =~ /\\bresolved\\b/",
-          "group": "group@5"
-        },
-        {
-          "command": "localReview.collapseThread",
-          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@6"
+          "group": "inline@1"
         },
         {
           "command": "localReview.deleteComment",
           "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
-          "group": "group@7"
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.editComment",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "localReview.copyCommentJson",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "localReview.copyCommentMarkdown",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "9_danger@1"
         }
       ],
       "comments/comment/context": [
@@ -678,6 +711,38 @@
           "group": "inline@2",
           "when": "commentController == localChangeReview"
         }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "localReview.copyThreadJson",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.copyThreadMarkdown",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty",
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "when": "commentController == localChangeReview && commentThread =~ /\\bopen\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "when": "commentController == localChangeReview && commentThread =~ /\\bresolved\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.deleteThread",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty",
+          "group": "inline@4"
+        },
+        {
+          "command": "localReview.collapseThread",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty",
+          "group": "inline@5"
+        }
       ]
     },
     "keybindings": [
@@ -685,7 +750,7 @@
         "command": "localReview.commentOnSelection",
         "key": "ctrl+alt+c",
         "mac": "cmd+alt+c",
-        "when": "editorTextFocus && resourceScheme == file"
+        "when": "editorTextFocus && resourceScheme == file && localReview.enabled"
       }
     ],
     "configuration": {
@@ -711,6 +776,11 @@
           "default": "collapsed",
           "description": "How comment threads are shown in the editor when they are first rendered."
         },
+        "localReview.renderDelayMs": {
+          "type": "number",
+          "default": 1500,
+          "markdownDescription": "Milliseconds to wait after a file becomes visible before drawing its comment threads. Works around a VS Code bug where a comment widget that is already drawn when the Git extension registers quick-diff for the file gets duplicated, leaving a second widget that cannot be removed. A side effect is that threads only exist for files you have open, so the built-in Comments view lists those only. Set to `0` to draw every thread immediately, as before."
+        },
         "localReview.highlightCommentedLines": {
           "type": "boolean",
           "default": true,
@@ -720,6 +790,21 @@
           "type": "boolean",
           "default": true,
           "description": "Show the active review session and its open-thread count in the status bar."
+        },
+        "localReview.markdown.commentStyle": {
+          "type": "string",
+          "enum": [
+            "blockquote",
+            "fenced",
+            "plain"
+          ],
+          "enumDescriptions": [
+            "Quote the comment with \"> \". Keeps the Markdown the reviewer wrote.",
+            "Wrap the comment in a code fence. Fully literal; no Markdown rendering.",
+            "Write the comment as a plain paragraph."
+          ],
+          "default": "blockquote",
+          "markdownDescription": "How comment bodies are delimited in Markdown exports, so a comment containing a heading or a rule is not read as part of the report's own structure."
         },
         "localReview.markdown.includeCode": {
           "type": "boolean",
@@ -740,6 +825,39 @@
           "type": "number",
           "default": 40,
           "description": "Maximum number of source lines embedded per thread in Markdown exports. Longer ranges are truncated."
+        },
+        "localReview.commenting": {
+          "type": "string",
+          "enum": [
+            "whenSessionActive",
+            "always",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Only offer the gutter \"+\" while a review session is open.",
+            "Always offer the gutter \"+\" on files.",
+            "Never offer the gutter \"+\". Existing threads still show; add comments from the panel."
+          ],
+          "default": "whenSessionActive",
+          "markdownDescription": "When to offer the `+` commenting affordance in the gutter. `whenSessionActive` leaves the gutter to other extensions — notably GitHub Pull Requests — until you explicitly start a review session."
+        },
+        "localReview.autoSuspendDuringPullRequestReview": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Suspend Local Review while a GitHub pull request review is open, so its threads and gutter affordances do not compete with the GitHub Pull Request extension. Detected via `#localReview.pullRequestSchemes#`."
+        },
+        "localReview.pullRequestSchemes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "review",
+            "pr",
+            "github-pr",
+            "pr-description"
+          ],
+          "markdownDescription": "URI schemes that mean a pull request review is open. If auto-suspend does not trigger (or triggers when it should not), adjust this list — run **Developer: Open Webview Developer Tools** or check a PR diff tab to see the scheme your setup actually uses."
         }
       }
     }
@@ -749,7 +867,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "tsc -p ./ --noEmit",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies",
+    "reinstall": "pnpm run package && code --install-extension \"$(ls -t *.vsix | head -1)\" --force"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

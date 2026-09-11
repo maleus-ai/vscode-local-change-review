@@ -1,7 +1,11 @@
 import type { ReviewCommentData, ReviewSessionData, ReviewThreadData } from './types';
 import { config, formatTimestamp, lineLabel } from './util';
 
+/** How a comment body is delimited from the surrounding document. */
+export type CommentStyle = 'blockquote' | 'fenced' | 'plain';
+
 export interface MarkdownOptions {
+  commentStyle: CommentStyle;
   includeCode: boolean;
   includeLineNumbers: boolean;
   includeResolved: boolean;
@@ -11,6 +15,7 @@ export interface MarkdownOptions {
 export function markdownOptions(overrides: Partial<MarkdownOptions> = {}): MarkdownOptions {
   const c = config();
   return {
+    commentStyle: c.get<CommentStyle>('markdown.commentStyle', 'blockquote'),
     includeCode: c.get<boolean>('markdown.includeCode', true),
     includeLineNumbers: c.get<boolean>('markdown.includeLineNumbers', true),
     includeResolved: c.get<boolean>('markdown.includeResolved', false),
@@ -53,14 +58,29 @@ export function threadAnchor(thread: ReviewThreadData): string {
   return `${thread.path}:${lineLabel(thread.startLine, thread.endLine)}`;
 }
 
-function commentLines(comment: ReviewCommentData, isReply: boolean): string[] {
+function commentLines(
+  comment: ReviewCommentData,
+  isReply: boolean,
+  options: MarkdownOptions,
+): string[] {
   const edited = comment.updatedAt ? ' · edited' : '';
   const kind = isReply ? ' · reply' : '';
-  return [
-    `**${comment.author}** · ${formatTimestamp(comment.createdAt)}${edited}${kind}`,
-    '',
-    comment.body.trimEnd(),
-  ];
+  const header = `**${comment.author}** · ${formatTimestamp(comment.createdAt)}${edited}${kind}`;
+  const body = comment.body.trimEnd().split(/\r?\n/);
+
+  switch (options.commentStyle) {
+    case 'fenced': {
+      const fence = fenceFor(body);
+      return [header, '', fence, ...body, fence];
+    }
+    case 'plain':
+      return [header, '', ...body];
+    default:
+      // A reviewer's comment is prose that may itself contain headings, lists or
+      // rules; quoting keeps it from being read as part of the report's own
+      // structure, without flattening the Markdown they wrote.
+      return [header, '', ...body.map((line) => (line.trim() ? `> ${line}` : '>'))];
+  }
 }
 
 export function threadToMarkdown(
@@ -76,7 +96,7 @@ export function threadToMarkdown(
     out.push(...code, '');
   }
   thread.comments.forEach((comment, i) => {
-    out.push(...commentLines(comment, i > 0), '');
+    out.push(...commentLines(comment, i > 0, options), '');
   });
   return out.join('\n').trimEnd();
 }
@@ -91,7 +111,7 @@ export function commentToMarkdown(
   if (code.length) {
     out.push(...code, '');
   }
-  out.push(...commentLines(comment, thread.comments[0]?.id !== comment.id));
+  out.push(...commentLines(comment, thread.comments[0]?.id !== comment.id, options));
   return out.join('\n').trimEnd();
 }
 
@@ -108,17 +128,18 @@ function sessionSubtitle(session: ReviewSessionData, shown: ReviewThreadData[], 
   return parts.join(' · ');
 }
 
-export function sessionToMarkdown(
+function renderThreads(
   session: ReviewSessionData,
-  options: MarkdownOptions = markdownOptions(),
+  threads: ReviewThreadData[],
+  titleSuffix: string,
+  options: MarkdownOptions,
+  groupByFile = true,
 ): string {
-  const shown = options.includeResolved
-    ? session.threads
-    : session.threads.filter((t) => t.status === 'open');
+  const shown = options.includeResolved ? threads : threads.filter((t) => t.status === 'open');
   const out: string[] = [
-    `# Local review — ${session.name}`,
+    `# Local review — ${session.name}${titleSuffix}`,
     '',
-    `_${sessionSubtitle(session, shown, session.threads)}_`,
+    `_${sessionSubtitle(session, shown, threads)}_`,
     '',
   ];
   if (shown.length === 0) {
@@ -128,13 +149,35 @@ export function sessionToMarkdown(
 
   let currentFile: string | undefined;
   for (const thread of shown) {
-    if (thread.path !== currentFile) {
+    if (groupByFile && thread.path !== currentFile) {
       currentFile = thread.path;
       out.push(`## \`${currentFile}\``, '');
     }
-    out.push(threadToMarkdown(thread, options, 3), '');
+    out.push(threadToMarkdown(thread, options, groupByFile ? 3 : 2), '');
   }
   return out.join('\n').trimEnd() + '\n';
+}
+
+export function sessionToMarkdown(
+  session: ReviewSessionData,
+  options: MarkdownOptions = markdownOptions(),
+): string {
+  return renderThreads(session, session.threads, '', options);
+}
+
+/** Every thread anchored in one file, for the panel's per-file copy actions. */
+export function fileToMarkdown(
+  session: ReviewSessionData,
+  filePath: string,
+  options: MarkdownOptions = markdownOptions(),
+): string {
+  return renderThreads(
+    session,
+    session.threads.filter((t) => t.path === filePath),
+    ` · \`${filePath}\``,
+    options,
+    false,
+  );
 }
 
 // --- JSON ------------------------------------------------------------------
@@ -161,6 +204,21 @@ export function commentToJson(
 ): string {
   const { comments: _comments, ...location } = thread;
   return JSON.stringify({ session: sessionMeta(session), location, comment }, null, 2);
+}
+
+export function fileToJson(
+  session: ReviewSessionData,
+  filePath: string,
+  includeResolved = true,
+): string {
+  const threads = session.threads.filter(
+    (t) => t.path === filePath && (includeResolved || t.status === 'open'),
+  );
+  return JSON.stringify(
+    { ...sessionMeta(session), version: session.version, file: filePath, threads },
+    null,
+    2,
+  );
 }
 
 export function sessionToJson(session: ReviewSessionData, includeResolved = true): string {

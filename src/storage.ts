@@ -1,5 +1,8 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { log } from './log';
 import {
   INDEX_FORMAT_VERSION,
   SESSION_FORMAT_VERSION,
@@ -46,6 +49,7 @@ export class ReviewStore implements vscode.Disposable {
   readonly onDidChange = this.onDidChangeEmitter.event;
 
   private readonly disposables: vscode.Disposable[] = [];
+  private disposed = false;
 
   get ready(): boolean {
     return this.root !== undefined;
@@ -133,9 +137,11 @@ export class ReviewStore implements vscode.Disposable {
     if (known !== undefined) {
       const current = await this.readText(uri);
       if (current === known) {
-        return; // our own write echoing back
+        log('watcher: own write ignored', { file: uri.path.split('/').pop() });
+        return;
       }
     }
+    log('watcher: external change -> reload', { file: uri.path.split('/').pop() });
     await this.reload();
     this.onDidChangeEmitter.fire();
   }
@@ -243,6 +249,7 @@ export class ReviewStore implements vscode.Disposable {
 
   private async writeNow(uri: vscode.Uri, content: string): Promise<void> {
     try {
+      log('write file', { file: uri.path.split('/').pop() });
       this.lastWritten.set(uri.toString(), content);
       await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
     } catch (err) {
@@ -266,26 +273,39 @@ export class ReviewStore implements vscode.Disposable {
     this.scheduleWrite(uri, `${JSON.stringify(this.index, null, 2)}\n`);
   }
 
-  /** Flushes debounced writes; called on deactivate. */
-  async flush(): Promise<void> {
-    const pending = [...this.pendingSaves.entries()];
-    this.pendingSaves.clear();
-    for (const [, timer] of pending) {
+  /**
+   * Writes every pending change synchronously. Called from `deactivate`, where
+   * awaiting anything delays the host teardown and leaves comment widgets
+   * stranded in the editor.
+   */
+  flushSync(): void {
+    const pending = new Set(this.pendingSaves.keys());
+    for (const [, timer] of this.pendingSaves) {
       clearTimeout(timer);
     }
-    // Re-persist everything we know about rather than tracking each pending body.
-    for (const session of this.sessions.values()) {
-      await this.writeNow(this.sessionUri(session.id), `${JSON.stringify(session, null, 2)}\n`);
+    this.pendingSaves.clear();
+    if (pending.size === 0 || !this.root || this.root.scheme !== 'file') {
+      return;
     }
-    if (this.root) {
-      await this.writeNow(
-        vscode.Uri.joinPath(this.root, INDEX_FILE),
-        `${JSON.stringify(this.index, null, 2)}\n`,
-      );
+    try {
+      fs.mkdirSync(path.join(this.root.fsPath, SESSIONS_DIR), { recursive: true });
+      for (const session of this.sessions.values()) {
+        const uri = this.sessionUri(session.id);
+        if (pending.has(uri.toString())) {
+          fs.writeFileSync(uri.fsPath, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+        }
+      }
+      const indexUri = vscode.Uri.joinPath(this.root, INDEX_FILE);
+      if (pending.has(indexUri.toString())) {
+        fs.writeFileSync(indexUri.fsPath, `${JSON.stringify(this.index, null, 2)}\n`, 'utf8');
+      }
+    } catch {
+      // Shutting down: a failed last write is not worth blocking teardown.
     }
   }
 
   private changed(): void {
+    log('store: changed');
     this.onDidChangeEmitter.fire();
   }
 
@@ -494,6 +514,10 @@ export class ReviewStore implements vscode.Disposable {
   }
 
   dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
     for (const [, timer] of this.pendingSaves) {
       clearTimeout(timer);
     }

@@ -4,24 +4,35 @@ import { ReviewComment, ReviewCommentsController } from './comments';
 import {
   commentToJson,
   commentToMarkdown,
+  fileToJson,
+  fileToMarkdown,
   markdownOptions,
   sessionToJson,
   sessionToMarkdown,
   threadToJson,
   threadToMarkdown,
 } from './export';
+import { disposeLog, initLog, log, showLog } from './log';
+import { PullRequestWatcher } from './prwatch';
 import { ReviewStore, type ThreadLocation } from './storage';
 import { ReviewTreeProvider, type TreeNode } from './tree';
 import type { ReviewSessionData } from './types';
 import { invalidateAuthorCache, storageUri } from './util';
 
+const SUSPEND_KEY = 'localReview.suspended';
+
 let activeStore: ReviewStore | undefined;
+let activeComments: ReviewCommentsController | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  initLog();
+  log('activate', { version: context.extension.packageJSON.version });
   const store = new ReviewStore();
   activeStore = store;
   const comments = new ReviewCommentsController(store);
+  activeComments = comments;
   const tree = new ReviewTreeProvider(store, comments);
+  const prWatcher = new PullRequestWatcher();
 
   const view = vscode.window.createTreeView('localReview.sessions', {
     treeDataProvider: tree,
@@ -31,34 +42,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
   status.command = 'localReview.switchSession';
 
-  context.subscriptions.push(store, comments, view, status);
+  context.subscriptions.push(store, comments, view, status, prWatcher);
+
+  let manualSuspend = context.workspaceState.get<boolean>(SUSPEND_KEY, false);
+  const suspendReason = (): string | undefined => {
+    if (manualSuspend) {
+      return 'suspended';
+    }
+    return prWatcher.isReviewing ? 'suspended during pull request review' : undefined;
+  };
+  const applySuspension = () => comments.setSuspended(manualSuspend || prWatcher.isReviewing);
 
   const refreshUi = () => {
     tree.refresh();
     const sessions = store.allSessions;
+    const reason = suspendReason();
     void vscode.commands.executeCommand('setContext', 'localReview.hasSessions', sessions.length > 0);
+    void vscode.commands.executeCommand('setContext', 'localReview.suspended', comments.isSuspended);
+    void vscode.commands.executeCommand('setContext', 'localReview.enabled', comments.canComment());
 
     const active = store.activeSession;
-    view.title = active ? `Review Sessions — ${active.name}` : 'Review Sessions';
+    view.title = active
+      ? `Review Sessions — ${active.name}${reason ? ' (suspended)' : ''}`
+      : 'Review Sessions';
     const show = vscode.workspace.getConfiguration('localReview').get<boolean>('showStatusBarItem', true);
-    if (!show || !active) {
+    if (!show || (!active && sessions.length === 0)) {
+      status.hide();
+      return;
+    }
+    if (reason) {
+      status.text = '$(debug-pause) Local Review suspended';
+      status.tooltip =
+        reason === 'suspended'
+          ? 'Local Review is suspended — no comments in the editor. Click to resume.'
+          : 'Local Review is suspended while a GitHub pull request review is open, so it does not compete with the Pull Request extension. Click to resume.';
+      status.command = 'localReview.resume';
+      status.show();
+      return;
+    }
+    if (!active) {
       status.hide();
       return;
     }
     const open = active.threads.filter((t) => t.status === 'open').length;
     status.text = `$(comment-discussion) ${active.name} · ${open}`;
     status.tooltip = `Local Review — active session "${active.name}", ${open} open thread(s). Click to switch sessions.`;
+    status.command = 'localReview.switchSession';
     status.show();
   };
 
   context.subscriptions.push(
     store.onDidChange(refreshUi),
     comments.onDidChangeView(refreshUi),
+    prWatcher.onDidChange(() => {
+      applySuspension();
+      refreshUi();
+    }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('localReview.author')) {
         invalidateAuthorCache();
       }
-      if (e.affectsConfiguration('localReview.showStatusBarItem')) {
+      if (
+        e.affectsConfiguration('localReview.showStatusBarItem') ||
+        e.affectsConfiguration('localReview.commenting')
+      ) {
         refreshUi();
       }
     }),
@@ -124,6 +171,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return active;
     }
     return prompt ? pickSession(store, 'Select a review session') : undefined;
+  };
+
+  /** The file row a command was invoked on, falling back to the tree selection. */
+  const resolveFile = (arg: unknown): { session: ReviewSessionData; path: string } | undefined => {
+    const node = asNode(arg) ?? view.selection.find((n) => n.kind === 'file');
+    if (!node || node.kind !== 'file') {
+      return undefined;
+    }
+    const session = store.getSession(node.sessionId);
+    return session ? { session, path: node.path } : undefined;
   };
 
   const copy = async (text: string, what: string): Promise<void> => {
@@ -230,13 +287,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   register('localReview.createThread', (reply: vscode.CommentReply) => comments.createThreadFromReply(reply));
   register('localReview.replyToThread', (reply: vscode.CommentReply) => comments.replyToThread(reply));
-
-  register('localReview.replyToComment', async (arg) => {
-    const found = resolveThread(arg);
-    if (found) {
-      await comments.reveal(found.thread.id);
-    }
-  });
 
   register('localReview.commentOnSelection', async () => {
     const editor = vscode.window.activeTextEditor;
@@ -351,14 +401,74 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   register('localReview.collapseAllThreads', () => comments.setAllCollapsed(true));
   register('localReview.expandAllThreads', () => comments.setAllCollapsed(false));
   register('localReview.refresh', () => {
-    comments.render();
+    comments.rebuild();
     refreshUi();
   });
+  register('localReview.suspend', async () => {
+    manualSuspend = true;
+    await context.workspaceState.update(SUSPEND_KEY, true);
+    applySuspension();
+    refreshUi();
+  });
+
+  register('localReview.resume', async () => {
+    manualSuspend = false;
+    await context.workspaceState.update(SUSPEND_KEY, false);
+    applySuspension();
+    refreshUi();
+    if (!prWatcher.isReviewing) {
+      return;
+    }
+    const answer = await vscode.window.showInformationMessage(
+      'Local Review stays suspended while a GitHub pull request review is open, so its comments do not compete with the Pull Request extension.',
+      'Comment during PR reviews anyway',
+    );
+    if (answer) {
+      await vscode.workspace
+        .getConfiguration('localReview')
+        .update('autoSuspendDuringPullRequestReview', false, vscode.ConfigurationTarget.Workspace);
+      prWatcher.refresh();
+      applySuspension();
+      refreshUi();
+    }
+  });
+
+  register('localReview.diagnostics', async () => {
+    const details = {
+      version: context.extension.packageJSON.version,
+      storageFolder: storageUri()?.fsPath ?? '(no folder open)',
+      sessions: store.allSessions.map((x) => ({
+        name: x.name,
+        id: x.id,
+        status: x.status,
+        threads: x.threads.length,
+        comments: x.threads.reduce((n, t) => n + t.comments.length, 0),
+      })),
+      activeSession: store.activeSession?.name ?? null,
+      pullRequestReviewDetected: prWatcher.isReviewing,
+      manualSuspend,
+      ...comments.stats(),
+    };
+    const text = JSON.stringify(details, null, 2);
+    const stats = comments.stats();
+    const answer = await vscode.window.showInformationMessage(
+      `Local Review: ${stats.liveThreads} thread widget(s), ${stats.trackedWidgets} tracked, ` +
+        `${stats.orphanWidgets} orphan(ed).`,
+      'Copy Details',
+    );
+    if (answer) {
+      await vscode.env.clipboard.writeText(text);
+    }
+  });
+
   register('localReview.showCommentsPanel', () =>
     vscode.commands.executeCommand('workbench.panel.comments.view.focus'),
   );
 
+  register('localReview.showLog', () => showLog());
+
   register('localReview.openThread', async (arg) => {
+    log('command: openThread');
     const found = resolveThread(arg);
     if (found) {
       await comments.reveal(found.thread.id);
@@ -387,6 +497,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const target = commentTarget(arg);
     if (target) {
       await copy(commentToJson(target.session, target.thread, target.comment), 'comment (JSON)');
+    }
+  });
+
+  register('localReview.copyFileMarkdown', async (arg) => {
+    const target = resolveFile(arg);
+    if (target) {
+      await copy(fileToMarkdown(target.session, target.path), `${target.path} (Markdown)`);
+    }
+  });
+
+  register('localReview.copyFileJson', async (arg) => {
+    const target = resolveFile(arg);
+    if (target) {
+      await copy(fileToJson(target.session, target.path), `${target.path} (JSON)`);
     }
   });
 
@@ -467,7 +591,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   await store.initialize();
-  comments.render();
+  applySuspension();
+  comments.startTracking();
   refreshUi();
 }
 
@@ -489,9 +614,15 @@ async function pickSession(store: ReviewStore, title: string): Promise<ReviewSes
   return picked?.session;
 }
 
-export async function deactivate(): Promise<void> {
-  // Writes are debounced, so a comment added in the last moments of the session
-  // would otherwise never reach disk.
-  await activeStore?.flush();
+export function deactivate(): void {
+  // Synchronous on purpose. Returning a promise here makes VS Code wait before
+  // tearing the host down, and the comment widgets stay on screen while the
+  // next host draws its own — the same thread twice after a window reload.
+  // Threads go first so the editor gets an explicit disposal for each.
+  log('deactivate');
+  activeComments?.dispose();
+  activeStore?.flushSync();
+  disposeLog();
+  activeComments = undefined;
   activeStore = undefined;
 }
