@@ -1,0 +1,760 @@
+{
+  "name": "local-change-review",
+  "displayName": "Local Change Review",
+  "description": "Review local (uncommitted) changes with GitHub-PR-style inline comments, organised into review sessions, exportable as Markdown or JSON for handing to an LLM.",
+  "version": "0.2.0",
+  "publisher": "shiranuit",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "review",
+    "code review",
+    "comments",
+    "llm",
+    "local"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "packageManager": "pnpm@10.24.0",
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "localReview",
+          "title": "Local Review",
+          "icon": "media/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "localReview": [
+        {
+          "id": "localReview.sessions",
+          "name": "Sessions",
+          "contextualTitle": "Local Review"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "localReview.sessions",
+        "contents": "No review session yet.\n\nStart a session, then select lines in any file and add a comment from the gutter or the editor context menu.\n[Start New Review Session](command:localReview.newSession)",
+        "when": "!localReview.hasSessions"
+      }
+    ],
+    "commands": [
+      {
+        "command": "localReview.newSession",
+        "title": "Start New Review Session",
+        "category": "Local Review",
+        "icon": "$(add)"
+      },
+      {
+        "command": "localReview.renameSession",
+        "title": "Rename Session",
+        "category": "Local Review",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "localReview.setActiveSession",
+        "title": "Set as Active Session",
+        "category": "Local Review",
+        "icon": "$(target)"
+      },
+      {
+        "command": "localReview.switchSession",
+        "title": "Switch Active Session...",
+        "category": "Local Review",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "localReview.closeSession",
+        "title": "Close Session",
+        "category": "Local Review",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "localReview.reopenSession",
+        "title": "Reopen Session",
+        "category": "Local Review",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "localReview.deleteSession",
+        "title": "Delete Session",
+        "category": "Local Review",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "localReview.showSessionInline",
+        "title": "Show Session Comments in Editor",
+        "category": "Local Review",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "localReview.hideSessionInline",
+        "title": "Hide Session Comments in Editor",
+        "category": "Local Review",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "localReview.commentOnSelection",
+        "title": "Add Review Comment on Selection",
+        "category": "Local Review",
+        "icon": "$(comment-add)"
+      },
+      {
+        "command": "localReview.createThread",
+        "title": "Add Comment",
+        "category": "Local Review"
+      },
+      {
+        "command": "localReview.replyToThread",
+        "title": "Reply",
+        "category": "Local Review"
+      },
+      {
+        "command": "localReview.replyToComment",
+        "title": "Reply to Thread",
+        "category": "Local Review",
+        "icon": "$(reply)"
+      },
+      {
+        "command": "localReview.editComment",
+        "title": "Edit Comment",
+        "category": "Local Review",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "localReview.saveComment",
+        "title": "Save",
+        "category": "Local Review"
+      },
+      {
+        "command": "localReview.cancelEditComment",
+        "title": "Cancel",
+        "category": "Local Review"
+      },
+      {
+        "command": "localReview.deleteComment",
+        "title": "Delete Comment",
+        "category": "Local Review",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "localReview.deleteThread",
+        "title": "Delete Thread",
+        "category": "Local Review",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "localReview.resolveThread",
+        "title": "Resolve Thread",
+        "category": "Local Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "localReview.unresolveThread",
+        "title": "Unresolve Thread",
+        "category": "Local Review",
+        "icon": "$(issue-reopened)"
+      },
+      {
+        "command": "localReview.collapseThread",
+        "title": "Collapse Thread",
+        "category": "Local Review",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "localReview.copyCommentMarkdown",
+        "title": "Copy Comment as Markdown",
+        "category": "Local Review",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "localReview.copyCommentJson",
+        "title": "Copy Comment as JSON",
+        "category": "Local Review",
+        "icon": "$(json)"
+      },
+      {
+        "command": "localReview.copyThreadMarkdown",
+        "title": "Copy Thread as Markdown",
+        "category": "Local Review",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "localReview.copyThreadJson",
+        "title": "Copy Thread as JSON",
+        "category": "Local Review",
+        "icon": "$(json)"
+      },
+      {
+        "command": "localReview.copySessionMarkdown",
+        "title": "Copy Session as Markdown",
+        "category": "Local Review",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "localReview.copySessionJson",
+        "title": "Copy Session as JSON",
+        "category": "Local Review",
+        "icon": "$(json)"
+      },
+      {
+        "command": "localReview.copyAllMarkdown",
+        "title": "Copy All Comments as Markdown",
+        "category": "Local Review",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "localReview.copyAllJson",
+        "title": "Copy All Comments as JSON",
+        "category": "Local Review",
+        "icon": "$(json)"
+      },
+      {
+        "command": "localReview.exportSession",
+        "title": "Export Session to File...",
+        "category": "Local Review",
+        "icon": "$(export)"
+      },
+      {
+        "command": "localReview.collapseAllThreads",
+        "title": "Fold All Comment Threads",
+        "category": "Local Review",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "localReview.expandAllThreads",
+        "title": "Unfold All Comment Threads",
+        "category": "Local Review",
+        "icon": "$(unfold)"
+      },
+      {
+        "command": "localReview.refresh",
+        "title": "Refresh",
+        "category": "Local Review",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "localReview.openThread",
+        "title": "Go to Review Comment",
+        "category": "Local Review",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "localReview.showCommentsPanel",
+        "title": "Show Comments Panel",
+        "category": "Local Review",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "localReview.openStorageFolder",
+        "title": "Reveal Review Storage Folder",
+        "category": "Local Review",
+        "icon": "$(folder-opened)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "localReview.createThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.replyToThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.editComment",
+          "when": "false"
+        },
+        {
+          "command": "localReview.saveComment",
+          "when": "false"
+        },
+        {
+          "command": "localReview.cancelEditComment",
+          "when": "false"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "false"
+        },
+        {
+          "command": "localReview.deleteThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.collapseThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.copyCommentMarkdown",
+          "when": "false"
+        },
+        {
+          "command": "localReview.copyCommentJson",
+          "when": "false"
+        },
+        {
+          "command": "localReview.copyThreadMarkdown",
+          "when": "false"
+        },
+        {
+          "command": "localReview.copyThreadJson",
+          "when": "false"
+        },
+        {
+          "command": "localReview.showSessionInline",
+          "when": "false"
+        },
+        {
+          "command": "localReview.hideSessionInline",
+          "when": "false"
+        },
+        {
+          "command": "localReview.setActiveSession",
+          "when": "false"
+        },
+        {
+          "command": "localReview.openThread",
+          "when": "false"
+        },
+        {
+          "command": "localReview.renameSession",
+          "when": "false"
+        },
+        {
+          "command": "localReview.reopenSession",
+          "when": "false"
+        },
+        {
+          "command": "localReview.replyToComment",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "localReview.commentOnSelection",
+          "group": "1_modification@100",
+          "when": "editorTextFocus && resourceScheme == file"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "localReview.newSession",
+          "when": "view == localReview.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "localReview.copyAllMarkdown",
+          "when": "view == localReview.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "localReview.copyAllJson",
+          "when": "view == localReview.sessions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "localReview.collapseAllThreads",
+          "when": "view == localReview.sessions",
+          "group": "navigation@4"
+        },
+        {
+          "command": "localReview.refresh",
+          "when": "view == localReview.sessions",
+          "group": "navigation@5"
+        },
+        {
+          "command": "localReview.switchSession",
+          "when": "view == localReview.sessions",
+          "group": "1_sessions@1"
+        },
+        {
+          "command": "localReview.exportSession",
+          "when": "view == localReview.sessions",
+          "group": "1_sessions@2"
+        },
+        {
+          "command": "localReview.expandAllThreads",
+          "when": "view == localReview.sessions",
+          "group": "2_fold@1"
+        },
+        {
+          "command": "localReview.showCommentsPanel",
+          "when": "view == localReview.sessions",
+          "group": "3_misc@1"
+        },
+        {
+          "command": "localReview.openStorageFolder",
+          "when": "view == localReview.sessions",
+          "group": "3_misc@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "localReview.showSessionInline",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bhidden\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.hideSessionInline",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bvisible\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.copySessionMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.copySessionJson",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.deleteSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "inline@4"
+        },
+        {
+          "command": "localReview.setActiveSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bnotactive\\b/",
+          "group": "1_state@1"
+        },
+        {
+          "command": "localReview.renameSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "1_state@2"
+        },
+        {
+          "command": "localReview.closeSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bopen\\b/",
+          "group": "1_state@3"
+        },
+        {
+          "command": "localReview.reopenSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bclosed\\b/",
+          "group": "1_state@4"
+        },
+        {
+          "command": "localReview.copySessionMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "localReview.copySessionJson",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "localReview.exportSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "2_copy@3"
+        },
+        {
+          "command": "localReview.deleteSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "localReview.copyThreadMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.copyThreadJson",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/ && viewItem =~ /\\bopen\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/ && viewItem =~ /\\bresolved\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.deleteThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "inline@4"
+        },
+        {
+          "command": "localReview.openThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "localReview.copyThreadMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "localReview.copyThreadJson",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/ && viewItem =~ /\\bopen\\b/",
+          "group": "3_state@1"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/ && viewItem =~ /\\bresolved\\b/",
+          "group": "3_state@2"
+        },
+        {
+          "command": "localReview.deleteThread",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "localReview.copyCommentMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "inline@1"
+        },
+        {
+          "command": "localReview.copyCommentJson",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "inline@2"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "inline@3"
+        },
+        {
+          "command": "localReview.openThread",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "localReview.copyCommentMarkdown",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "localReview.copyCommentJson",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "localReview.editComment",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "3_edit@1"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
+          "group": "9_danger@1"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "localReview.createThread",
+          "group": "inline@1",
+          "when": "commentController == localChangeReview && commentThreadIsEmpty"
+        },
+        {
+          "command": "localReview.replyToThread",
+          "group": "inline@1",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "localReview.copyThreadMarkdown",
+          "group": "inline@1",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "group": "inline@2",
+          "when": "commentController == localChangeReview && commentThread =~ /\\bopen\\b/"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "group": "inline@2",
+          "when": "commentController == localChangeReview && commentThread =~ /\\bresolved\\b/"
+        },
+        {
+          "command": "localReview.collapseThread",
+          "group": "inline@3",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
+        },
+        {
+          "command": "localReview.copyThreadJson",
+          "group": "1_copy@1",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
+        },
+        {
+          "command": "localReview.copyAllMarkdown",
+          "group": "1_copy@2",
+          "when": "commentController == localChangeReview"
+        },
+        {
+          "command": "localReview.copyAllJson",
+          "group": "1_copy@3",
+          "when": "commentController == localChangeReview"
+        },
+        {
+          "command": "localReview.deleteThread",
+          "group": "9_danger@1",
+          "when": "commentController == localChangeReview && !commentThreadIsEmpty"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "localReview.replyToComment",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@1"
+        },
+        {
+          "command": "localReview.editComment",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@2"
+        },
+        {
+          "command": "localReview.copyCommentMarkdown",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@3"
+        },
+        {
+          "command": "localReview.copyCommentJson",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@4"
+        },
+        {
+          "command": "localReview.resolveThread",
+          "when": "commentController == localChangeReview && comment =~ /\\bopen\\b/",
+          "group": "group@5"
+        },
+        {
+          "command": "localReview.unresolveThread",
+          "when": "commentController == localChangeReview && comment =~ /\\bresolved\\b/",
+          "group": "group@5"
+        },
+        {
+          "command": "localReview.collapseThread",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@6"
+        },
+        {
+          "command": "localReview.deleteComment",
+          "when": "commentController == localChangeReview && comment =~ /\\bcanEdit\\b/",
+          "group": "group@7"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "localReview.cancelEditComment",
+          "group": "inline@1",
+          "when": "commentController == localChangeReview"
+        },
+        {
+          "command": "localReview.saveComment",
+          "group": "inline@2",
+          "when": "commentController == localChangeReview"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "localReview.commentOnSelection",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c",
+        "when": "editorTextFocus && resourceScheme == file"
+      }
+    ],
+    "configuration": {
+      "title": "Local Change Review",
+      "properties": {
+        "localReview.storageFolder": {
+          "type": "string",
+          "default": ".local-review",
+          "markdownDescription": "Workspace-relative folder where review sessions are stored. Use `.vscode/local-review` to keep them next to your other editor settings.",
+          "scope": "resource"
+        },
+        "localReview.author": {
+          "type": "string",
+          "default": "",
+          "description": "Name recorded as the author of new comments. Defaults to your git user.name, then to your OS username."
+        },
+        "localReview.defaultThreadState": {
+          "type": "string",
+          "enum": [
+            "expanded",
+            "collapsed"
+          ],
+          "default": "collapsed",
+          "description": "How comment threads are shown in the editor when they are first rendered."
+        },
+        "localReview.highlightCommentedLines": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight commented line ranges in the editor and the overview ruler."
+        },
+        "localReview.showStatusBarItem": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the active review session and its open-thread count in the status bar."
+        },
+        "localReview.markdown.includeCode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the commented source lines in Markdown exports."
+        },
+        "localReview.markdown.includeLineNumbers": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefix each line of included source with its line number in Markdown exports."
+        },
+        "localReview.markdown.includeResolved": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include resolved threads when copying or exporting a whole session as Markdown."
+        },
+        "localReview.markdown.maxCodeLines": {
+          "type": "number",
+          "default": 40,
+          "description": "Maximum number of source lines embedded per thread in Markdown exports. Longer ranges are truncated."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "pnpm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc -p ./ --noEmit",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.7.2"
+  }
+}
