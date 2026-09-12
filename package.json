@@ -2,7 +2,7 @@
   "name": "local-change-review",
   "displayName": "Local Change Review",
   "description": "Review local (uncommitted) changes with GitHub-PR-style inline comments, organised into review sessions, exportable as Markdown or JSON for handing to an LLM.",
-  "version": "0.4.0",
+  "version": "0.16.0",
   "publisher": "shiranuit",
   "license": "MIT",
   "repository": {
@@ -27,6 +27,9 @@
     "local"
   ],
   "main": "./out/extension.js",
+  "bin": {
+    "local-review-mcp": "./out/mcp/server.js"
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -253,10 +256,34 @@
         "icon": "$(unfold)"
       },
       {
+        "command": "localReview.reanchor",
+        "title": "Re-anchor Comments to Current Code",
+        "category": "Local Review",
+        "icon": "$(references)"
+      },
+      {
         "command": "localReview.refresh",
-        "title": "Redraw Comment Threads",
+        "title": "Reload and Redraw",
         "category": "Local Review",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "localReview.markRead",
+        "title": "Mark Thread as Read",
+        "category": "Local Review",
+        "icon": "$(check)"
+      },
+      {
+        "command": "localReview.markAllRead",
+        "title": "Mark All as Read",
+        "category": "Local Review",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "localReview.markAllUnread",
+        "title": "Mark All as Unread",
+        "category": "Local Review",
+        "icon": "$(circle-large-outline)"
       },
       {
         "command": "localReview.openThread",
@@ -398,6 +425,10 @@
         {
           "command": "localReview.copyFileJson",
           "when": "false"
+        },
+        {
+          "command": "localReview.markRead",
+          "when": "false"
         }
       ],
       "editor/context": [
@@ -472,33 +503,53 @@
           "command": "localReview.showLog",
           "when": "view == localReview.sessions",
           "group": "3_misc@3"
+        },
+        {
+          "command": "localReview.reanchor",
+          "when": "view == localReview.sessions",
+          "group": "2_fold@2"
+        },
+        {
+          "command": "localReview.markAllRead",
+          "when": "view == localReview.sessions",
+          "group": "2_fold@3"
+        },
+        {
+          "command": "localReview.markAllUnread",
+          "when": "view == localReview.sessions",
+          "group": "2_fold@4"
         }
       ],
       "view/item/context": [
         {
+          "command": "localReview.setActiveSession",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bnotactive\\b/",
+          "group": "inline@1"
+        },
+        {
           "command": "localReview.showSessionInline",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bhidden\\b/",
-          "group": "inline@1"
+          "group": "inline@2"
         },
         {
           "command": "localReview.hideSessionInline",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/ && viewItem =~ /\\bvisible\\b/",
-          "group": "inline@1"
+          "group": "inline@2"
         },
         {
           "command": "localReview.copySessionMarkdown",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
-          "group": "inline@2"
+          "group": "inline@3"
         },
         {
           "command": "localReview.copySessionJson",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
-          "group": "inline@3"
+          "group": "inline@4"
         },
         {
           "command": "localReview.deleteSession",
           "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
-          "group": "inline@4"
+          "group": "inline@5"
         },
         {
           "command": "localReview.setActiveSession",
@@ -654,6 +705,21 @@
           "command": "localReview.deleteComment",
           "when": "view == localReview.sessions && viewItem =~ /^comment\\b/",
           "group": "9_danger@1"
+        },
+        {
+          "command": "localReview.markRead",
+          "when": "view == localReview.sessions && viewItem =~ /^thread\\b/ && viewItem =~ /\\bunread\\b/",
+          "group": "inline@0"
+        },
+        {
+          "command": "localReview.markAllRead",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "2_copy@4"
+        },
+        {
+          "command": "localReview.markAllUnread",
+          "when": "view == localReview.sessions && viewItem =~ /^session\\b/",
+          "group": "2_copy@5"
         }
       ],
       "comments/commentThread/context": [
@@ -767,6 +833,44 @@
           "default": "",
           "description": "Name recorded as the author of new comments. Defaults to your git user.name, then to your OS username."
         },
+        "localReview.avatars": {
+          "type": "string",
+          "enum": [
+            "initials",
+            "github",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Generated initials on a colour derived from the author's name.",
+            "GitHub profile picture where the login is known, initials otherwise.",
+            "No avatar."
+          ],
+          "default": "github",
+          "markdownDescription": "Avatar and name shown beside each comment. `github` uses the profile picture and profile name for authors whose GitHub login is known — the account signed in to VS Code (matched against either its login or its profile name), or an entry in `#localReview.githubUsers#` — and falls back to generated initials and the recorded author name for everyone else, so it never shows a broken image. Requires network access for the accounts it recognises."
+        },
+        "localReview.authorName": {
+          "type": "string",
+          "enum": [
+            "github-login",
+            "github-name",
+            "recorded"
+          ],
+          "enumDescriptions": [
+            "The GitHub account name, e.g. \"Shiranuit\".",
+            "The GitHub profile name, e.g. \"Yannick Combes\".",
+            "The author name recorded on the comment, resolving nothing."
+          ],
+          "default": "github-login",
+          "markdownDescription": "Which name to show beside a comment for authors whose GitHub login is known. Authors that cannot be resolved always show the name recorded on the comment. Only affects display — the stored `author` never changes."
+        },
+        "localReview.githubUsers": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Maps the author name recorded on a comment to a GitHub login, for authors this extension cannot work out on its own — a teammate whose review you received, or your own account when the name in `git config user.name` matches neither your GitHub login nor your profile name. Example: `{ \"Shiranuit\": \"shiranuit\" }`. Your own account usually needs no entry."
+        },
         "localReview.defaultThreadState": {
           "type": "string",
           "enum": [
@@ -775,11 +879,6 @@
           ],
           "default": "collapsed",
           "description": "How comment threads are shown in the editor when they are first rendered."
-        },
-        "localReview.renderDelayMs": {
-          "type": "number",
-          "default": 1500,
-          "markdownDescription": "Milliseconds to wait after a file becomes visible before drawing its comment threads. Works around a VS Code bug where a comment widget that is already drawn when the Git extension registers quick-diff for the file gets duplicated, leaving a second widget that cannot be removed. A side effect is that threads only exist for files you have open, so the built-in Comments view lists those only. Set to `0` to draw every thread immediately, as before."
         },
         "localReview.highlightCommentedLines": {
           "type": "boolean",
@@ -868,12 +967,18 @@
     "watch": "tsc -watch -p ./",
     "lint": "tsc -p ./ --noEmit",
     "package": "vsce package --no-dependencies",
-    "reinstall": "pnpm run package && code --install-extension \"$(ls -t *.vsix | head -1)\" --force"
+    "reinstall": "pnpm run package && code --install-extension \"$(ls -t *.vsix | head -1)\" --force",
+    "mcp": "node ./out/mcp/server.js",
+    "test": "pnpm run compile && node test/lock.test.js && node test/core.test.js && node test/anchor.test.js && node test/unread.test.js && node test/mcp.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.6.2"
   }
 }

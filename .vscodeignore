@@ -6,3 +6,8 @@ node_modules/**
 tsconfig.json
 .gitignore
 pnpm-lock.yaml
+
+.local-review/**
+out/mcp/**
+.mcp.json
+test/**

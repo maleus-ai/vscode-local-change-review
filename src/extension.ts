@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 
+import { Identities } from './identities';
 import { ReviewComment, ReviewCommentsController } from './comments';
+import { ReviewDecorationProvider } from './decorations';
 import {
   commentToJson,
   commentToMarkdown,
@@ -16,22 +18,23 @@ import { disposeLog, initLog, log, showLog } from './log';
 import { PullRequestWatcher } from './prwatch';
 import { ReviewStore, type ThreadLocation } from './storage';
 import { ReviewTreeProvider, type TreeNode } from './tree';
+import { UnreadTracker } from './unread';
 import type { ReviewSessionData } from './types';
-import { invalidateAuthorCache, storageUri } from './util';
+import { invalidateAuthorCache, readLinesSync, relPath, resolveAuthor, storageUri } from './util';
 
 const SUSPEND_KEY = 'localReview.suspended';
 
-let activeStore: ReviewStore | undefined;
 let activeComments: ReviewCommentsController | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLog();
   log('activate', { version: context.extension.packageJSON.version });
   const store = new ReviewStore();
-  activeStore = store;
-  const comments = new ReviewCommentsController(store);
+  const identities = new Identities(context.globalStorageUri);
+  const comments = new ReviewCommentsController(store, identities);
   activeComments = comments;
-  const tree = new ReviewTreeProvider(store, comments);
+  const unread = new UnreadTracker(context.workspaceState);
+  const tree = new ReviewTreeProvider(store, comments, identities, unread);
   const prWatcher = new PullRequestWatcher();
 
   const view = vscode.window.createTreeView('localReview.sessions', {
@@ -42,7 +45,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
   status.command = 'localReview.switchSession';
 
-  context.subscriptions.push(store, comments, view, status, prWatcher);
+  context.subscriptions.push(
+    store,
+    comments,
+    view,
+    status,
+    prWatcher,
+    identities,
+    unread,
+    vscode.window.registerFileDecorationProvider(new ReviewDecorationProvider()),
+  );
+
+  // "19 minutes ago" is only true for a minute, so redraw the rows while the
+  // panel is on screen.
+  const clock = setInterval(() => {
+    if (view.visible) {
+      tree.refresh();
+    }
+  }, 60_000);
+  context.subscriptions.push(new vscode.Disposable(() => clearInterval(clock)));
 
   let manualSuspend = context.workspaceState.get<boolean>(SUSPEND_KEY, false);
   const suspendReason = (): string | undefined => {
@@ -53,9 +74,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   const applySuspension = () => comments.setSuspended(manualSuspend || prWatcher.isReviewing);
 
+  // Read marks are the one piece of state that cannot be rebuilt, and
+  // `ReviewFiles.read()` never throws — an unreadable folder, a branch switch
+  // that takes `.local-review` away, a session file caught mid-write, or a
+  // storage-folder change all read as simply "no sessions". Pruning against
+  // that wipes every mark. So prune only against a read we have reason to
+  // trust: the store is up, and it has not just gone empty on us.
+  let sawSessions = false;
   const refreshUi = () => {
     tree.refresh();
     const sessions = store.allSessions;
+    if (sessions.length > 0) {
+      sawSessions = true;
+    }
+    if (store.ready && !(sessions.length === 0 && sawSessions)) {
+      unread.prune(new Set(sessions.flatMap((s) => s.threads.map((t) => t.id))));
+    }
     const reason = suspendReason();
     void vscode.commands.executeCommand('setContext', 'localReview.hasSessions', sessions.length > 0);
     void vscode.commands.executeCommand('setContext', 'localReview.suspended', comments.isSuspended);
@@ -100,7 +134,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('localReview.author')) {
-        invalidateAuthorCache();
+        // Re-resolved and then repainted: the unread badges are computed against
+        // this name, and leaving it empty counts nothing as unread until the
+        // next comment is posted.
+        void invalidateAuthorCache().then(() => {
+          comments.rebuild();
+          tree.refresh();
+        });
+      }
+      if (
+        e.affectsConfiguration('localReview.avatars') ||
+        e.affectsConfiguration('localReview.authorName') ||
+        e.affectsConfiguration('localReview.githubUsers')
+      ) {
+        identities.invalidate();
+        comments.rebuild();
+        tree.refresh();
       }
       if (
         e.affectsConfiguration('localReview.showStatusBarItem') ||
@@ -147,7 +196,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return undefined;
   };
 
-  const resolveSession = async (arg: unknown, prompt = true): Promise<ReviewSessionData | undefined> => {
+  const resolveSession = async (
+    arg: unknown,
+    options: { fallbackToActive?: boolean } = {},
+  ): Promise<ReviewSessionData | undefined> => {
     const node = asNode(arg);
     if (node) {
       const session = store.getSession(node.sessionId);
@@ -166,11 +218,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return session;
       }
     }
-    const active = store.activeSession;
-    if (active) {
-      return active;
+    // Only commands that genuinely mean "the one I am working in" fall back to
+    // the active session; the rest ask, because guessing a destructive target is
+    // worse than one extra click.
+    if (options.fallbackToActive !== false) {
+      const active = store.activeSession;
+      if (active) {
+        return active;
+      }
     }
-    return prompt ? pickSession(store, 'Select a review session') : undefined;
+    return pickSession(store, 'Select a review session');
   };
 
   /** The file row a command was invoked on, falling back to the tree selection. */
@@ -209,7 +266,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
     const session = await store.createSession(name);
-    void vscode.window.showInformationMessage(`Local Review: started "${session.name}".`);
+    if (session) {
+      void vscode.window.showInformationMessage(`Local Review: started "${session.name}".`);
+    }
   });
 
   register('localReview.switchSession', async () => {
@@ -255,7 +314,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
 
   register('localReview.deleteSession', async (arg) => {
-    const session = await resolveSession(arg, false);
+    const session = await resolveSession(arg, { fallbackToActive: false });
     if (!session) {
       return;
     }
@@ -270,14 +329,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
 
   register('localReview.showSessionInline', async (arg) => {
-    const session = await resolveSession(arg, false);
+    const session = await resolveSession(arg, { fallbackToActive: false });
     if (session) {
       comments.setSessionVisible(session.id, true);
     }
   });
 
   register('localReview.hideSessionInline', async (arg) => {
-    const session = await resolveSession(arg, false);
+    const session = await resolveSession(arg, { fallbackToActive: false });
     if (session) {
       comments.setSessionVisible(session.id, false);
     }
@@ -400,7 +459,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   register('localReview.collapseAllThreads', () => comments.setAllCollapsed(true));
   register('localReview.expandAllThreads', () => comments.setAllCollapsed(false));
+  register('localReview.reanchor', () => {
+    const moved = store.reanchor(readLinesSync);
+    vscode.window.setStatusBarMessage(
+      moved ? '$(check) Local Review: comments re-anchored' : '$(check) Local Review: anchors already current',
+      3000,
+    );
+  });
+
   register('localReview.refresh', () => {
+    // Re-read first: "it hasn't updated" is usually a missed change, not a
+    // mis-drawn widget, and there was previously no way to force a re-read.
+    store.refreshFromDisk();
     comments.rebuild();
     refreshUi();
   });
@@ -446,6 +516,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       })),
       activeSession: store.activeSession?.name ?? null,
       pullRequestReviewDetected: prWatcher.isReviewing,
+      identities: identities.describe(),
       manualSuspend,
       ...comments.stats(),
     };
@@ -471,7 +542,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log('command: openThread');
     const found = resolveThread(arg);
     if (found) {
+      // Opening it is reading it.
+      unread.markRead(found.thread);
+      tree.refresh();
       await comments.reveal(found.thread.id);
+    }
+  });
+
+  register('localReview.markRead', (arg) => {
+    const found = resolveThread(arg);
+    if (found) {
+      unread.markRead(found.thread);
+    }
+  });
+
+  // See the note on copyAllMarkdown: no argument means the title bar, which
+  // means every session. Getting this wrong on markAllUnread destroyed read
+  // state for a session the user was not even looking at.
+  register('localReview.markAllRead', async (arg) => {
+    if (arg === undefined) {
+      unread.markAllRead(store.allSessions.flatMap((s) => s.threads));
+      return;
+    }
+    const session = await resolveSession(arg);
+    if (session) {
+      unread.markAllRead(session.threads);
+    }
+  });
+
+  register('localReview.markAllUnread', async (arg) => {
+    if (arg === undefined) {
+      unread.markAllUnread(store.allSessions.flatMap((s) => s.threads));
+      return;
+    }
+    const session = await resolveSession(arg);
+    if (session) {
+      unread.markAllUnread(session.threads);
     }
   });
 
@@ -528,6 +634,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
+  /** "3 sessions (Markdown)" — what the clipboard actually received. */
+  const everything = (sessions: readonly ReviewSessionData[], format: string) =>
+    sessions.length === 1
+      ? `"${sessions[0].name}" (${format})`
+      : `${sessions.length} sessions (${format})`;
+
   const copySessionMarkdown = async (arg: unknown) => {
     const session = await resolveSession(arg);
     if (session) {
@@ -543,8 +655,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   register('localReview.copySessionMarkdown', copySessionMarkdown);
   register('localReview.copySessionJson', copySessionJson);
-  register('localReview.copyAllMarkdown', copySessionMarkdown);
-  register('localReview.copyAllJson', copySessionJson);
+
+  // The "All" commands sit in the panel's title bar, where VS Code passes no
+  // argument at all — so they cannot mean "the row you clicked", and falling
+  // back to the active session made a button labelled "All" copy exactly one
+  // session, silently chosen. With no argument they mean the whole panel; the
+  // context-menu entries on a session row still pass their node and stay
+  // session-scoped.
+  register('localReview.copyAllMarkdown', async (arg) => {
+    if (arg !== undefined) {
+      return copySessionMarkdown(arg);
+    }
+    const sessions = store.allSessions;
+    if (sessions.length === 0) {
+      return;
+    }
+    await copy(sessions.map((s) => sessionToMarkdown(s)).join('\n\n---\n\n'), everything(sessions, 'Markdown'));
+  });
+  register('localReview.copyAllJson', async (arg) => {
+    if (arg !== undefined) {
+      return copySessionJson(arg);
+    }
+    const sessions = store.allSessions;
+    if (sessions.length === 0) {
+      return;
+    }
+    await copy(
+      `[\n${sessions.map((s) => sessionToJson(s)).join(',\n')}\n]`,
+      everything(sessions, 'JSON'),
+    );
+  });
 
   register('localReview.exportSession', async (arg) => {
     const session = await resolveSession(arg);
@@ -590,10 +730,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return first ? store.findComment(first.id) : undefined;
   }
 
+  context.subscriptions.push(
+    // Catch up on anything the watcher missed while attention was elsewhere.
+    vscode.window.onDidChangeWindowState((e) => {
+      if (e.focused) {
+        store.refreshFromDisk();
+      }
+    }),
+    view.onDidChangeVisibility((e) => {
+      if (e.visible) {
+        store.refreshFromDisk();
+      }
+    }),
+    identities.onDidChange(() => {
+      comments.rebuild();
+      tree.refresh();
+    }),
+    unread.onDidChange(() => tree.refresh()),
+  );
+  context.subscriptions.push(
+    vscode.authentication.onDidChangeSessions((e) => {
+      if (e.provider.id === 'github') {
+        void identities.resolveGitHubAccount().then((changed) => {
+          if (changed) {
+            comments.rebuild();
+            tree.refresh();
+          }
+        });
+      }
+    }),
+  );
+  void identities.resolveGitHubAccount().then((changed) => {
+    if (changed) {
+      comments.rebuild();
+      tree.refresh();
+    }
+  });
+
+  // Awaited, not fired and forgotten. The first paint counts unread comments
+  // against this name, and a badge on every comment you wrote yourself is the
+  // worst possible first impression for a notification.
+  await resolveAuthor();
+
   await store.initialize();
+  // Files may have been rewritten by anything at all since the last session.
+  store.reanchor(readLinesSync);
   applySuspension();
-  comments.startTracking();
+  comments.render();
   refreshUi();
+
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme === 'file') {
+        store.reanchor(readLinesSync, relPath(doc.uri));
+      }
+    }),
+  );
 }
 
 async function pickSession(store: ReviewStore, title: string): Promise<ReviewSessionData | undefined> {
@@ -615,14 +807,11 @@ async function pickSession(store: ReviewStore, title: string): Promise<ReviewSes
 }
 
 export function deactivate(): void {
-  // Synchronous on purpose. Returning a promise here makes VS Code wait before
-  // tearing the host down, and the comment widgets stay on screen while the
-  // next host draws its own — the same thread twice after a window reload.
-  // Threads go first so the editor gets an explicit disposal for each.
+  // Synchronous, and with nothing left to flush: every write already committed
+  // to disk inside a locked transaction. Threads go first so the editor gets an
+  // explicit disposal for each before the host is torn down.
   log('deactivate');
   activeComments?.dispose();
-  activeStore?.flushSync();
   disposeLog();
   activeComments = undefined;
-  activeStore = undefined;
 }

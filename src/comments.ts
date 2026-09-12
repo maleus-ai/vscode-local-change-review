@@ -1,6 +1,9 @@
+import { createHash } from 'crypto';
 import * as vscode from 'vscode';
 
 import { log } from './log';
+import { splitLines } from './core/format';
+import { Identities } from './identities';
 import type { ReviewStore, ThreadLocation } from './storage';
 import type { ReviewSessionData, ReviewThreadData, ThreadStatus } from './types';
 import {
@@ -31,8 +34,9 @@ export class ReviewComment implements vscode.Comment {
     public author: vscode.CommentAuthorInformation,
     public timestamp?: Date,
     threadStatus: ThreadStatus = 'open',
+    rawBody?: string,
   ) {
-    this.savedBody = bodyText(body);
+    this.savedBody = rawBody ?? bodyText(body);
     this.contextValue = `canEdit ${threadStatus}`;
   }
 }
@@ -68,9 +72,6 @@ export class ReviewCommentsController implements vscode.Disposable {
   private anchorTimer: NodeJS.Timeout | undefined;
   private suspended = false;
   private disposed = false;
-  /** Documents that have been visible long enough for quick-diff to have loaded. */
-  private readonly settled = new Set<string>();
-  private readonly settleTimers = new Map<string, NodeJS.Timeout>();
 
   private readonly rangeDecoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
@@ -83,7 +84,10 @@ export class ReviewCommentsController implements vscode.Disposable {
   private readonly onDidChangeViewEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeView = this.onDidChangeViewEmitter.event;
 
-  constructor(private readonly store: ReviewStore) {
+  constructor(
+    private readonly store: ReviewStore,
+    private readonly identities: Identities,
+  ) {
     log('controller: created');
     this.controller = vscode.comments.createCommentController(CONTROLLER_ID, 'Local Review');
     this.controller.options = {
@@ -102,7 +106,7 @@ export class ReviewCommentsController implements vscode.Disposable {
       this.store.onDidChange(() => this.render()),
       vscode.workspace.onDidChangeTextDocument((e) => this.scheduleAnchorSync(e.document)),
       vscode.workspace.onDidSaveTextDocument((doc) => void this.syncAnchors(doc)),
-      vscode.window.onDidChangeVisibleTextEditors(() => this.trackVisibleEditors()),
+      vscode.window.onDidChangeVisibleTextEditors(() => this.updateDecorations()),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (
           e.affectsConfiguration('localReview.highlightCommentedLines') ||
@@ -110,72 +114,8 @@ export class ReviewCommentsController implements vscode.Disposable {
         ) {
           this.updateDecorations();
         }
-        if (e.affectsConfiguration('localReview.renderDelayMs')) {
-          this.trackVisibleEditors();
-        }
       }),
     );
-  }
-
-  private get renderDelay(): number {
-    return Math.max(0, config().get<number>('renderDelayMs', 1500));
-  }
-
-  /**
-   * A thread that is already drawn when the Git extension registers quick-diff
-   * for its document makes VS Code rebuild the document's comment zones and
-   * leave two widgets for the one thread — and the extra zone cannot be disposed
-   * from here. So threads are drawn only for documents that have been visible
-   * long enough for that to have happened, and are retired when the document
-   * closes so re-opening starts the wait again.
-   */
-  /** Begins watching visible editors and draws whatever is already eligible. */
-  startTracking(): void {
-    this.trackVisibleEditors();
-  }
-
-  private trackVisibleEditors(): void {
-    this.updateDecorations();
-    if (this.renderDelay === 0) {
-      this.render();
-      return;
-    }
-    const visible = new Set(vscode.window.visibleTextEditors.map((e) => e.document.uri.toString()));
-    for (const key of [...this.settled]) {
-      if (!visible.has(key)) {
-        this.settled.delete(key);
-      }
-    }
-    for (const [key, timer] of [...this.settleTimers]) {
-      if (!visible.has(key)) {
-        clearTimeout(timer);
-        this.settleTimers.delete(key);
-      }
-    }
-    for (const key of visible) {
-      if (this.settled.has(key) || this.settleTimers.has(key)) {
-        continue;
-      }
-      this.settleTimers.set(
-        key,
-        setTimeout(() => {
-          this.settleTimers.delete(key);
-          this.settled.add(key);
-          log('document settled, drawing threads', { file: key.split('/').pop() });
-          this.render();
-        }, this.renderDelay),
-      );
-    }
-    this.render();
-  }
-
-  private isSettled(uri: vscode.Uri): boolean {
-    return this.renderDelay === 0 || this.settled.has(uri.toString());
-  }
-
-  /** Marks a document ready immediately; used when the user acts on it directly. */
-  markSettled(uri: vscode.Uri): void {
-    this.settled.add(uri.toString());
   }
 
   /** Whether we should offer to create comments at all right now. */
@@ -249,9 +189,6 @@ export class ReviewCommentsController implements vscode.Disposable {
 
     for (const session of sessions) {
       for (const thread of session.threads) {
-        if (!this.isSettled(resolvePath(thread.path))) {
-          continue;
-        }
         seen.add(thread.id);
         this.syncThread(session, thread, multipleSessions);
       }
@@ -325,19 +262,23 @@ export class ReviewCommentsController implements vscode.Disposable {
     session: ReviewSessionData,
     data: ReviewThreadData,
   ): ReviewComment[] {
-    return data.comments.map(
-      (c) =>
-        new ReviewComment(
-          c.id,
-          data.id,
-          session.id,
-          new vscode.MarkdownString(c.body),
-          vscode.CommentMode.Preview,
-          { name: c.author },
-          new Date(c.updatedAt ?? c.createdAt),
-          data.status,
-        ),
-    );
+    return data.comments.map((c) => {
+      const comment = new ReviewComment(
+        c.id,
+        data.id,
+        session.id,
+        new vscode.MarkdownString(c.body),
+        vscode.CommentMode.Preview,
+        { name: this.identities.displayName(c.author), iconPath: this.identities.forAuthor(c.author) },
+        new Date(c.updatedAt ?? c.createdAt),
+        data.status,
+        c.body,
+      );
+      if (c.agent) {
+        comment.label = 'Agent';
+      }
+      return comment;
+    });
   }
 
   private syncThread(session: ReviewSessionData, data: ReviewThreadData, showSessionName: boolean): void {
@@ -348,7 +289,12 @@ export class ReviewCommentsController implements vscode.Disposable {
       data.status === 'resolved'
         ? vscode.CommentThreadState.Resolved
         : vscode.CommentThreadState.Unresolved;
-    const label = showSessionName ? session.name : undefined;
+    const label = [
+      showSessionName ? session.name : undefined,
+      data.outdated && data.status !== 'resolved' ? 'outdated' : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · ') || undefined;
     const live = this.live.get(data.id);
 
     if (!live) {
@@ -417,11 +363,19 @@ export class ReviewCommentsController implements vscode.Disposable {
     const editing = live.comments.some(
       (c) => c instanceof ReviewComment && c.mode === vscode.CommentMode.Editing,
     );
-    if (!editing && this.meta.get(live)?.signature !== signature) {
+    const previous = this.meta.get(live)?.signature;
+    if (!editing && previous !== signature) {
       log('write comments', { id: data.id, count: data.comments.length });
       live.comments = this.buildComments(session, data);
     }
-    this.meta.set(live, { threadId: data.id, sessionId: session.id, signature });
+    this.meta.set(live, {
+      threadId: data.id,
+      sessionId: session.id,
+      // Only ever the signature actually rendered. Recording the new one while
+      // skipping the rebuild would make the difference undetectable forever, and
+      // a comment left in edit mode never leaves it on its own.
+      signature: editing ? (previous ?? '') : signature,
+    });
   }
 
   private updateDecorations(): void {
@@ -462,7 +416,7 @@ export class ReviewCommentsController implements vscode.Disposable {
    */
   private async syncAnchors(document: vscode.TextDocument): Promise<void> {
     const key = document.uri.toString();
-    const lines = document.getText().split(/\r?\n/);
+    const lines = splitLines(document.getText());
     let touched = false;
     for (const [id, live] of this.live) {
       if (live.uri.toString() !== key || !live.range) {
@@ -485,8 +439,6 @@ export class ReviewCommentsController implements vscode.Disposable {
     return {
       suspended: this.suspended,
       canComment: this.canComment(),
-      renderDelayMs: this.renderDelay,
-      settledDocuments: [...this.settled].map((u) => u.split('/').pop()),
       liveThreads: this.live.size,
       trackedWidgets: this.created.size,
       orphanWidgets: [...this.created].filter((t) => !tracked.has(t) && t !== this.draft).length,
@@ -552,15 +504,15 @@ export class ReviewCommentsController implements vscode.Disposable {
       endLine,
       snippet: lines.slice(startLine - 1, endLine),
       languageId: languageIdFor(uri),
-      comments: [{ author: await resolveAuthor(), body: text }],
+      author: await resolveAuthor(),
+      agent: false,
+      body: text,
     });
     // The thread behind the input widget is throwaway — ours from a Ctrl+Alt+C
     // draft, or one VS Code made for the gutter "+". `render()` has already put a
     // managed one in its place.
     reply.thread.dispose();
     this.forget(reply.thread);
-    // The user is acting on this document right now, so don't make them wait.
-    this.markSettled(uri);
     if (created) {
       this.pendingExpand = created.id;
       this.render();
@@ -630,12 +582,24 @@ export class ReviewCommentsController implements vscode.Disposable {
       this.cancelEdit(comment);
       return;
     }
+    if (!this.store.findComment(comment.commentId)) {
+      // Deleted underneath us, most likely by an agent. Say so rather than
+      // dropping the edit silently while the widget still shows it.
+      void vscode.window.showWarningMessage(
+        'Local Review: that comment no longer exists, so the edit was not saved.',
+      );
+      this.cancelEdit(comment);
+      this.render();
+      return;
+    }
     comment.mode = vscode.CommentMode.Preview;
     comment.savedBody = text;
     if (live) {
       live.comments = [...live.comments];
     }
     this.store.updateComment(comment.commentId, text);
+    // Editing is over, so apply anything render skipped while it was in progress.
+    this.render();
   }
 
   cancelEdit(comment: ReviewComment): void {
@@ -645,6 +609,7 @@ export class ReviewCommentsController implements vscode.Disposable {
     if (live) {
       live.comments = [...live.comments];
     }
+    this.render();
   }
 
   // --- folding & navigation ------------------------------------------------
@@ -685,12 +650,17 @@ export class ReviewCommentsController implements vscode.Disposable {
     }
 
     const range = toRange(found.thread.startLine, found.thread.endLine);
-    const editor = await vscode.window.showTextDocument(uri, {
-      selection: range,
-      preview: false,
-    });
-    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-    log('reveal: editor shown', { id: threadId });
+    try {
+      const editor = await vscode.window.showTextDocument(uri, { selection: range, preview: false });
+      editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      log('reveal: editor shown', { id: threadId });
+    } catch {
+      // Usually a file an agent deleted or renamed — which is exactly the thread
+      // a reviewer clicks to find out what happened, so explain it.
+      void vscode.window.showWarningMessage(
+        `Local Review: ${found.thread.path} no longer exists. The comment still records the code it was written against.`,
+      );
+    }
   }
 
   dispose(): void {
@@ -698,10 +668,6 @@ export class ReviewCommentsController implements vscode.Disposable {
       return;
     }
     this.disposed = true;
-    for (const [, timer] of this.settleTimers) {
-      clearTimeout(timer);
-    }
-    this.settleTimers.clear();
     if (this.anchorTimer) {
       clearTimeout(this.anchorTimer);
     }
@@ -725,6 +691,18 @@ function sameLines(a: vscode.Range | undefined, b: vscode.Range): boolean {
   return a !== undefined && a.start.line === b.start.line && a.end.line === b.end.line;
 }
 
+/**
+ * Identity of a thread's rendered content. Hashes comment bodies rather than
+ * their length: an external writer (an LLM editing the JSON) changes text
+ * without touching `updatedAt`, and a length-based signature would miss it and
+ * leave the widget showing stale text.
+ */
 function threadSignature(thread: ReviewThreadData): string {
-  return `${thread.status}#` + thread.comments.map((c) => `${c.id}:${c.updatedAt ?? c.createdAt}:${c.body.length}`).join('|');
+  const hash = createHash('sha1').update(thread.status);
+  for (const c of thread.comments) {
+    hash.update('\u0000').update(c.id);
+    hash.update('\u0000').update(c.updatedAt ?? c.createdAt);
+    hash.update('\u0000').update(c.body);
+  }
+  return hash.digest('base64');
 }

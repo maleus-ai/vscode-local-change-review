@@ -2,9 +2,14 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { ReviewCommentsController } from './comments';
+import type { Identities } from './identities';
+import type { UnreadTracker } from './unread';
+import { currentAuthor } from './util';
 import type { ReviewStore } from './storage';
 import type { ReviewSessionData, ReviewThreadData } from './types';
-import { formatTimestamp, lineLabel, resolvePath } from './util';
+import { summaryLine } from './core/format';
+import { sessionUri, threadUri } from './decorations';
+import { formatTimestamp, lineLabel, relativeShort, relativeTime, resolvePath } from './util';
 
 export type TreeNode =
   | { kind: 'session'; sessionId: string }
@@ -19,6 +24,8 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   constructor(
     private readonly store: ReviewStore,
     private readonly comments: ReviewCommentsController,
+    private readonly identities: Identities,
+    private readonly unread: UnreadTracker,
   ) {}
 
   refresh(): void {
@@ -109,20 +116,22 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         : vscode.TreeItemCollapsibleState.None,
     );
     item.id = `session:${session.id}`;
-    const bits = [`${open} open`];
-    if (resolved > 0) {
-      bits.push(`${resolved} resolved`);
-    }
-    if (isActive) {
-      bits.push('active');
-    }
-    if (session.status === 'closed') {
-      bits.push('closed');
-    }
-    item.description = bits.join(' · ');
-    item.iconPath = new vscode.ThemeIcon(
-      session.status === 'closed' ? 'check-all' : isActive ? 'circle-filled' : 'circle-outline',
-    );
+    const me = currentAuthor();
+    const unread = session.threads.reduce((n, t) => n + this.unread.unread(t, me), 0);
+    item.description = [
+      isActive ? 'active' : undefined,
+      `${open} open`,
+      resolved > 0 ? `${resolved} resolved` : undefined,
+      session.status === 'closed' ? 'closed' : undefined,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    item.resourceUri = sessionUri(session.id, isActive, unread);
+    item.iconPath = session.status === 'closed'
+      ? new vscode.ThemeIcon('check-all', new vscode.ThemeColor('disabledForeground'))
+      : isActive
+        ? new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('charts.blue'))
+        : new vscode.ThemeIcon('circle-outline');
     item.contextValue = [
       'session',
       isActive ? 'isactive' : 'notactive',
@@ -150,7 +159,12 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     );
     item.id = `file:${session.id}:${filePath}`;
     item.resourceUri = resolvePath(filePath);
+    item.iconPath = vscode.ThemeIcon.File;
     item.description = path.posix.dirname(filePath) === '.' ? undefined : path.posix.dirname(filePath);
+    const unread = threads.reduce((n, t) => n + this.unread.unread(t, currentAuthor()), 0);
+    item.description = [item.description, unread > 0 ? `${unread} new` : undefined]
+      .filter(Boolean)
+      .join(' · ');
     item.tooltip = `${filePath} — ${threads.length} thread(s)`;
     item.contextValue = 'file';
     return item;
@@ -163,16 +177,36 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
     const first = thread.comments[0];
     const item = new vscode.TreeItem(
-      firstLine(first?.body ?? '(empty)'),
+      summaryLabel(first?.body ?? ''),
       thread.comments.length > 1
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None,
     );
     item.id = `thread:${thread.id}`;
-    const replies = thread.comments.length - 1;
-    item.description = `Ln ${lineLabel(thread.startLine, thread.endLine)}${replies > 0 ? ` · ${replies} repl${replies === 1 ? 'y' : 'ies'}` : ''}`;
-    item.iconPath = new vscode.ThemeIcon(thread.status === 'resolved' ? 'pass-filled' : 'comment');
-    item.contextValue = `thread ${thread.status}`;
+    const unread = this.unread.unread(thread, currentAuthor());
+    // No counts here: the badge at the end of the row already carries the unread
+    // count, and the expand chevron already says there are replies.
+    item.description = [
+      `Ln ${lineLabel(thread.startLine, thread.endLine)}`,
+      first ? this.identities.displayName(first.author) : undefined,
+      first?.agent ? 'agent' : undefined,
+      first ? relativeShort(first.createdAt) : undefined,
+    ]
+      .filter((b): b is string => Boolean(b))
+      .join(' · ');
+    item.resourceUri = threadUri(thread, unread);
+    // The icon is the thread's state and nothing else, so a resolved thread still
+    // reads as resolved when it has comments you have not seen.
+    item.iconPath =
+      thread.status === 'resolved'
+        ? new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('charts.green'))
+        : thread.outdated
+          ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
+          : new vscode.ThemeIcon('comment');
+    item.contextValue =
+      `thread ${thread.status}` +
+      `${thread.outdated && thread.status !== 'resolved' ? ' outdated' : ''}` +
+      `${unread > 0 ? ' unread' : ''}`;
     item.tooltip = threadTooltip(thread);
     item.command = {
       command: 'localReview.openThread',
@@ -188,10 +222,16 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     if (!thread || !comment) {
       return new vscode.TreeItem('(missing comment)');
     }
-    const item = new vscode.TreeItem(firstLine(comment.body), vscode.TreeItemCollapsibleState.None);
+    const item = new vscode.TreeItem(summaryLabel(comment.body), vscode.TreeItemCollapsibleState.None);
     item.id = `comment:${comment.id}`;
-    item.description = `${comment.author} · ${formatTimestamp(comment.createdAt)}`;
-    item.iconPath = new vscode.ThemeIcon('reply');
+    item.description = [
+      this.identities.displayName(comment.author),
+      comment.agent ? 'agent' : undefined,
+      relativeShort(comment.createdAt),
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    item.iconPath = new vscode.ThemeIcon('reply', new vscode.ThemeColor('descriptionForeground'));
     item.contextValue = 'comment';
     const tooltip = new vscode.MarkdownString(comment.body);
     tooltip.supportHtml = false;
@@ -205,9 +245,9 @@ export class ReviewTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 }
 
-function firstLine(text: string): string {
-  const line = text.split(/\r?\n/).find((l) => l.trim().length > 0) ?? text;
-  return line.trim().slice(0, 120) || '(empty)';
+/** A tree label is a plain string — VS Code renders no Markdown in one. */
+function summaryLabel(body: string): vscode.TreeItemLabel {
+  return { label: summaryLine(body) || '(empty)' };
 }
 
 function threadTooltip(thread: ReviewThreadData): vscode.MarkdownString {
@@ -217,7 +257,9 @@ function threadTooltip(thread: ReviewThreadData): vscode.MarkdownString {
     md.appendCodeblock(thread.snippet.slice(0, 12).join('\n'), thread.languageId);
   }
   for (const comment of thread.comments) {
-    md.appendMarkdown(`\n**${comment.author}** · ${formatTimestamp(comment.createdAt)}\n\n${comment.body}\n`);
+    md.appendMarkdown(
+      `\n**${comment.author}** · ${relativeTime(comment.createdAt)} · ${formatTimestamp(comment.createdAt)}\n\n${comment.body}\n`,
+    );
   }
   return md;
 }

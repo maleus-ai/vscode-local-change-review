@@ -17,6 +17,137 @@ No branch to push, no throwaway PR, no pile of review comments on a PR nobody ha
 
 ![The Local Review panel](media/image.png)
 
+## Letting an LLM read and write the review
+
+The same review files are exposed over MCP, so an agent can list threads, reply,
+open its own, and export — while you keep control of what counts as resolved.
+
+### Install
+
+Build it once:
+
+```bash
+pnpm install && pnpm run compile
+```
+
+Everything below points at `out/mcp/server.js` by **absolute path**. That matters:
+the server takes its *workspace* from the directory the client runs it in, so one
+build serves every repository, and a repository you never review gets no
+`.local-review/` folder created.
+
+For brevity, `SERVER` below means
+`/absolute/path/to/local-change-review/out/mcp/server.js`.
+
+#### Claude Code
+
+```bash
+claude mcp add --scope user local-review -- node SERVER      # every repository
+claude mcp add local-review -- node SERVER                   # this repository only
+```
+
+Then **restart Claude Code and approve the server** when it asks. Until you do,
+`claude mcp list` shows `⏸ Pending approval` and no tools appear —
+`claude mcp reset-project-choices` makes it ask again if you declined by accident.
+Working inside this repository, the bundled `.mcp.json` already registers it, so
+only the approval applies.
+
+#### Codex
+
+```bash
+codex mcp add local-review --env LOCAL_REVIEW_AUTHOR=codex -- node SERVER
+```
+
+Codex keeps MCP servers in `~/.codex/config.toml`, so this is always user-level:
+
+```toml
+[mcp_servers.local-review]
+command = "node"
+args = ["/absolute/path/to/local-change-review/out/mcp/server.js"]
+env = { LOCAL_REVIEW_AUTHOR = "codex" }
+```
+
+#### Gemini CLI
+
+```bash
+gemini mcp add -s user  -e LOCAL_REVIEW_AUTHOR=gemini local-review node SERVER
+gemini mcp add -s project -e LOCAL_REVIEW_AUTHOR=gemini local-review node SERVER
+```
+
+`-s project` is the default. The two scopes write `~/.gemini/settings.json` and
+`.gemini/settings.json` respectively, both under an `mcpServers` key in the shape
+shown below.
+
+#### Cursor
+
+Cursor reads `~/.cursor/mcp.json` for every project and `.cursor/mcp.json` for one,
+using the same shape:
+
+```json
+{
+  "mcpServers": {
+    "local-review": {
+      "command": "node",
+      "args": ["/absolute/path/to/local-change-review/out/mcp/server.js"],
+      "env": { "LOCAL_REVIEW_AUTHOR": "cursor" }
+    }
+  }
+}
+```
+
+#### Anything else
+
+Most clients take that same `mcpServers` block; put it in the client's global
+config for every project, or its per-project config for one. VS Code's own agent
+mode is the notable exception — it uses `.vscode/mcp.json` with a `servers` key
+rather than `mcpServers`.
+
+The server speaks MCP over stdio, so there is no port and nothing to discover: the
+client starts the process, and the editor picks up whatever it writes through the
+file watcher it already has.
+
+Set `LOCAL_REVIEW_AUTHOR` to whatever you want that agent's comments signed as —
+it is also the name the resolve rule keys off, so give each agent its own.
+
+### Tools
+
+| Tool                               | What it does                                                                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `list_sessions` / `create_session` | See sessions, start a new round                                                                                           |
+| `list_threads`                     | Threads with their comments; filter by `file`, `status`, `author`, `agent`, `needsReply`, and `compact` for one line each |
+| `get_thread`                       | One thread, including the source it is anchored to                                                                        |
+| `create_thread`                    | Open a thread on a line range                                                                                             |
+| `add_comment`                      | Reply to a thread                                                                                                         |
+| `resolve_thread`                   | Close a thread — **only ones the agent opened itself**                                                                    |
+| `unresolve_thread`                 | Reopen any thread, with a comment saying why                                                                              |
+| `export_markdown`                  | A session, a file, or one thread as Markdown                                                                              |
+
+Two rules shape it:
+
+- **The agent cannot resolve your comments.** `resolve_thread` refuses any thread
+  whose opening comment has a different author, and says so. It can reply with what
+  it changed; whether that counts as done stays your call, in the editor.
+- **It can reopen any thread, but never silently.** Closing a comment hides work
+  from you; reopening only asks for your attention, so it is not restricted — an
+  agent that thinks an issue is not actually fixed should be able to say so.
+  `unresolve_thread` requires a comment and posts it in the same step, so a thread
+  never springs back open unexplained.
+- **Line numbers are re-anchored on every read**, so they reflect the code as it is
+  now rather than as it was when you wrote the comment.
+
+Two filters worth knowing, because they shape the workflow:
+
+- `needsReply: true` returns only threads whose most recent comment is not the
+  agent's — its actual queue of work, without reasoning about timestamps.
+- `compact: true` returns one summary line per thread instead of every body,
+  around 3× smaller on real review prose. Survey with it, then `get_thread` the
+  ones that matter.
+
+Writes go through the same locked transaction the extension uses, and the editor
+picks them up live through its file watcher — no coordination between the two.
+
+Environment: `LOCAL_REVIEW_ROOT` (default: cwd), `LOCAL_REVIEW_STORAGE`
+(default `.local-review`), `LOCAL_REVIEW_AUTHOR` (default `claude`).
+
 ## Build & install
 
 ```bash
@@ -40,7 +171,15 @@ The panel is at **View → Appearance → Panel**, tab **Local Review**.
     session-20260912-091200.json
   exports/                written by "Export Session to File…"
     session-20260911-143000.md
+  .lock/                  a directory, present only while a write is in flight
 ```
+
+Every write — from the editor and from the MCP server alike — happens under
+`.lock/`, so the two never overlap. It is a *directory* holding one file named
+after its owner, because `rmdir` refusing a non-empty directory is the only
+conditional removal POSIX offers: a lock that has changed hands cannot be taken
+away by a writer still acting on an older judgement. If a process is killed
+mid-write the lock is reclaimed automatically once it goes stale.
 
 A session file:
 
@@ -64,12 +203,16 @@ A session file:
       "createdAt": "…",
       "updatedAt": "…",
       "comments": [
-        { "id": "comment-…", "author": "Shiranuit", "body": "…", "createdAt": "…" }
+        { "id": "comment-…", "author": "Shiranuit", "agent": false, "body": "…", "createdAt": "…" }
       ]
     }
   ]
 }
 ```
+
+`agent` records whether a comment came from an agent through the MCP server or
+from a person in the editor; it is absent on comments written before the flag
+existed, which is not the same as `false`.
 
 `path` is workspace-relative and POSIX-separated. `startLine`/`endLine` are **1-based and inclusive**. `snippet` is the source the comment was anchored to, captured (and refreshed) as you edit — so an export is readable without opening the file.
 
@@ -96,6 +239,20 @@ Add `.local-review/` to `.gitignore` if you'd rather not commit reviews, or comm
 Thread-scoped actions appear once, on the thread; comment-scoped actions appear
 on each comment. Replies go in the thread's reply box. Session-scoped actions
 (copy everything, new session, delete session) are in the **Local Review** panel.
+
+### Reading the panel
+
+Each row carries three separate signals, one per channel:
+
+| Channel                     | Means                                            |
+| --------------------------- | ------------------------------------------------ |
+| Icon                        | the thread's state — open, resolved, or outdated |
+| Badge at the end of the row | comments you have not read                       |
+| Dimmed text                 | location, author, reply count, age               |
+
+So a resolved thread that an agent has just commented on still shows as resolved,
+with a count at the end of the line telling you something arrived. Opening the
+thread clears the count; **Mark All as Read** clears them in bulk.
 
 ### In the **Local Review** panel
 
@@ -160,16 +317,23 @@ way, edit the list rather than waiting for a fix.
 | `localReview.markdown.includeResolved`    | `false`             | Include resolved threads when exporting a session.                        |
 | `localReview.markdown.maxCodeLines`       | `40`                | Truncate long embedded snippets.                                          |
 
+### Built-in VS Code settings worth knowing
+
+The comment widgets are rendered by VS Code, not by this extension, so their
+behaviour is tuned through VS Code's own `comments.*` settings:
+
+| Setting                      | Default | Meaning                                                                                                                                                                                                                  |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `comments.maxHeight`         | `true`  | Caps the widget's height and scrolls long comments. Set to `false` to let the widget **expand to the full comment** instead — useful for long review findings, at the cost of pushing the surrounding code further down. |
+| `comments.collapseOnResolve` | `true`  | Collapse a thread when it is resolved.                                                                                                                                                                                   |
+| `comments.useRelativeTime`   | `true`  | Show `1 day ago` rather than an absolute timestamp.                                                                                                                                                                      |
+
 ## Notes & limits
 
-- Comment threads are drawn about 1.5s after a file becomes visible, and only for
-  files you have open. That works around a VS Code bug: a comment widget that is
-  already drawn when the Git extension registers quick-diff for the file gets
-  duplicated, and the extra widget cannot be disposed by the extension that owns
-  it. A consequence is that the built-in Comments view lists threads only for open
-  files; the Local Review panel always lists everything. `localReview.renderDelayMs: 0`
-  restores immediate drawing if you don't use Git.
-
 - Sessions are stored under the **first** workspace folder. Files outside it are recorded by absolute path.
-- Thread anchors follow edits while the file is open in the editor, and are written back on save. Edits made to a file by an external tool while it is closed will leave anchors pointing at the old line numbers — `snippet` still records what was commented on.
+- Thread anchors follow edits in the editor, and are re-found by content otherwise:
+  on startup, on save, on demand (**Re-anchor Comments to Current Code**) and on
+  every MCP read. A thread whose code can no longer be found anywhere in the file
+  is marked **outdated** rather than left pointing at whatever now occupies those
+  lines.
 - Editing `.local-review/**` from outside the editor is picked up automatically.

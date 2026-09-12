@@ -1,102 +1,66 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { type ReadLines, reanchorAll } from './core/anchor';
+import { ReviewFiles, type StoreState } from './core/files';
+import * as ops from './core/operations';
+import type { CommentLocation, ThreadLocation } from './core/operations';
+import { INDEX_FORMAT_VERSION, type ReviewCommentData, type ReviewSessionData, type ThreadStatus } from './core/types';
 import { log } from './log';
-import {
-  INDEX_FORMAT_VERSION,
-  SESSION_FORMAT_VERSION,
-  type ReviewCommentData,
-  type ReviewIndexData,
-  type ReviewSessionData,
-  type ReviewThreadData,
-  type ThreadStatus,
-} from './types';
-import { gitBase, newId, nowIso, sessionId, storageUri } from './util';
+import { gitBase, storageUri, toPosix } from './util';
 
-const INDEX_FILE = 'index.json';
-const SESSIONS_DIR = 'sessions';
-/** Pre-0.2.0 name for the same thing; read-only, so older reviews aren't orphaned. */
-const LEGACY_SESSIONS_DIR = 'rounds';
-
-export interface ThreadLocation {
-  session: ReviewSessionData;
-  thread: ReviewThreadData;
-}
-
-export interface CommentLocation extends ThreadLocation {
-  comment: ReviewCommentData;
-  /** 0 for the thread's opening comment, >0 for replies. */
-  index: number;
-}
+export type { CommentLocation, ThreadLocation } from './core/operations';
 
 /**
- * Owns everything under the storage folder. Sessions are one JSON file each so
- * that an external editor (or an LLM) touching one session never has to rewrite
- * the others; `index.json` only carries the pointer to the active session.
+ * The editor's view of the review. Holds an in-memory copy purely for
+ * rendering; every write is a mutation handed to `ReviewFiles.transaction`,
+ * which re-reads from disk under a lock first. That is what lets another writer
+ * — an MCP server, a hand edit — share the same files without being clobbered.
  */
 export class ReviewStore implements vscode.Disposable {
-  private readonly sessions = new Map<string, ReviewSessionData>();
-  private index: ReviewIndexData = { version: INDEX_FORMAT_VERSION };
-  private root: vscode.Uri | undefined;
+  private files: ReviewFiles | undefined;
+  private state: StoreState = emptyState();
   private watcher: vscode.FileSystemWatcher | undefined;
 
-  /** Serialised content of every file we wrote, so our own writes don't loop back through the watcher. */
+  /** Content we wrote ourselves, so the watcher doesn't treat the echo as news. */
   private readonly lastWritten = new Map<string, string>();
-  private readonly pendingSaves = new Map<string, NodeJS.Timeout>();
+  private readonly disposables: vscode.Disposable[] = [];
+  private disposed = false;
 
   private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.onDidChangeEmitter.event;
 
-  private readonly disposables: vscode.Disposable[] = [];
-  private disposed = false;
-
   get ready(): boolean {
-    return this.root !== undefined;
+    return this.files !== undefined;
   }
 
   get storageFolder(): vscode.Uri | undefined {
-    return this.root;
+    return this.files ? vscode.Uri.file(this.files.root) : undefined;
   }
 
   /** Newest session first. */
   get allSessions(): ReviewSessionData[] {
-    return [...this.sessions.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return ops.allSessions(this.state);
   }
 
   get activeSession(): ReviewSessionData | undefined {
-    const id = this.index.activeSessionId;
-    return id ? this.sessions.get(id) : undefined;
+    const id = this.state.index.activeSessionId;
+    return id ? this.state.sessions.get(id) : undefined;
   }
 
   get activeSessionId(): string | undefined {
-    return this.index.activeSessionId;
+    return this.state.index.activeSessionId;
   }
 
   getSession(id: string): ReviewSessionData | undefined {
-    return this.sessions.get(id);
+    return this.state.sessions.get(id);
   }
 
   findThread(threadId: string): ThreadLocation | undefined {
-    for (const session of this.sessions.values()) {
-      const thread = session.threads.find((t) => t.id === threadId);
-      if (thread) {
-        return { session, thread };
-      }
-    }
-    return undefined;
+    return ops.findThread(this.state, threadId);
   }
 
   findComment(commentId: string): CommentLocation | undefined {
-    for (const session of this.sessions.values()) {
-      for (const thread of session.threads) {
-        const index = thread.comments.findIndex((c) => c.id === commentId);
-        if (index >= 0) {
-          return { session, thread, comment: thread.comments[index], index };
-        }
-      }
-    }
-    return undefined;
+    return ops.findComment(this.state, commentId);
   }
 
   async initialize(): Promise<void> {
@@ -114,16 +78,25 @@ export class ReviewStore implements vscode.Disposable {
   private async reattach(): Promise<void> {
     this.watcher?.dispose();
     this.watcher = undefined;
-    this.sessions.clear();
     this.lastWritten.clear();
-    this.index = { version: INDEX_FORMAT_VERSION };
-    this.root = storageUri();
+    this.state = emptyState();
 
-    if (this.root) {
-      await this.reload();
-      const pattern = new vscode.RelativePattern(this.root, '**/*.json');
-      this.watcher = vscode.workspace.createFileSystemWatcher(pattern);
-      const onExternal = (uri: vscode.Uri) => void this.handleExternalChange(uri);
+    const uri = storageUri();
+    this.files = uri && uri.scheme === 'file' ? new ReviewFiles(uri.fsPath) : undefined;
+
+    if (this.files && uri) {
+      this.reload();
+      // Anchored on the workspace folder, not on the storage folder: a watch
+      // rooted at a directory that is later deleted and recreated goes deaf,
+      // and the storage folder is deleted routinely (clearing old reviews).
+      const folder = vscode.workspace.getWorkspaceFolder(uri);
+      const relative = folder ? uri.fsPath.slice(folder.uri.fsPath.length + 1) : undefined;
+      this.watcher = vscode.workspace.createFileSystemWatcher(
+        folder && relative
+          ? new vscode.RelativePattern(folder, `${toPosix(relative)}/**/*.json`)
+          : new vscode.RelativePattern(uri, '**/*.json'),
+      );
+      const onExternal = (changed: vscode.Uri) => void this.handleExternalChange(changed);
       this.watcher.onDidChange(onExternal);
       this.watcher.onDidCreate(onExternal);
       this.watcher.onDidDelete(onExternal);
@@ -131,386 +104,184 @@ export class ReviewStore implements vscode.Disposable {
     this.onDidChangeEmitter.fire();
   }
 
+  /**
+   * Re-reads from disk and announces any difference.
+   *
+   * The watcher is an optimisation, not a guarantee — it can miss events, and a
+   * missed one would otherwise be permanent. This is cheap enough to run
+   * whenever attention returns to the window.
+   */
+  refreshFromDisk(): void {
+    if (!this.files) {
+      return;
+    }
+    const before = snapshot(this.state);
+    this.reload();
+    if (snapshot(this.state) !== before) {
+      log('refreshed from disk: the watcher had missed a change');
+      this.onDidChangeEmitter.fire();
+    }
+  }
+
+  private reload(): void {
+    if (!this.files) {
+      return;
+    }
+    this.state = this.files.read();
+    ops.reconcileActiveSession(this.state);
+    // After a reload our in-memory state no longer corresponds to anything we
+    // wrote, so nothing we wrote is still an echo worth suppressing.
+    this.lastWritten.clear();
+  }
+
   private async handleExternalChange(uri: vscode.Uri): Promise<void> {
     const key = uri.toString();
     const known = this.lastWritten.get(key);
     if (known !== undefined) {
-      const current = await this.readText(uri);
-      if (current === known) {
-        log('watcher: own write ignored', { file: uri.path.split('/').pop() });
-        return;
+      // Single-shot. An entry that outlives the event it was meant to swallow
+      // goes on claiming our old content is ours, so restoring that content —
+      // `git checkout -- .local-review`, or an undo — looks like an echo and is
+      // ignored, leaving the panel showing threads that are no longer on disk.
+      this.lastWritten.delete(key);
+      try {
+        const current = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+        if (current === known) {
+          return;
+        }
+      } catch {
+        // deleted; fall through and reload
       }
     }
     log('watcher: external change -> reload', { file: uri.path.split('/').pop() });
-    await this.reload();
+    this.reload();
     this.onDidChangeEmitter.fire();
   }
 
-  private async readText(uri: vscode.Uri): Promise<string | undefined> {
+  /**
+   * The single write path: run a mutation against the on-disk state under lock,
+   * then refresh the in-memory copy from what was actually committed and record
+   * the written content so the watcher does not treat our own echo as news.
+   *
+   * Everything that writes goes through here. The variants differ only in
+   * whether they announce the change and whether a failure is worth a dialog.
+   */
+  private commit<T>(
+    mutate: (state: StoreState) => T,
+    options: { notify: (result: T) => boolean; loud: boolean },
+  ): T | undefined {
+    if (!this.files) {
+      if (options.loud) {
+        void vscode.window.showWarningMessage('Local Review: open a folder before making changes.');
+      }
+      return undefined;
+    }
+    const before = snapshot(this.state);
     try {
-      return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
-    } catch {
+      const { result, state, written, removed } = this.files.transaction(mutate);
+      this.state = state;
+      for (const [file, content] of written) {
+        this.lastWritten.set(vscode.Uri.file(file).toString(), content);
+      }
+      for (const file of removed) {
+        this.lastWritten.delete(vscode.Uri.file(file).toString());
+      }
+      // Fired when the store changed at all, not only when this mutation says
+      // so: a transaction re-reads from disk first, so a silent write adopts any
+      // external change with it — and would otherwise bury it.
+      if (options.notify(result) || snapshot(this.state) !== before) {
+        this.onDidChangeEmitter.fire();
+      }
+      return result;
+    } catch (err) {
+      log('transaction failed', { error: String(err) });
+      if (options.loud) {
+        void vscode.window.showErrorMessage(`Local Review: ${String(err)}`);
+      }
       return undefined;
     }
   }
 
-  private async readDir(uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
-    try {
-      return await vscode.workspace.fs.readDirectory(uri);
-    } catch {
-      return [];
-    }
+  private apply<T>(mutate: (state: StoreState) => T): T | undefined {
+    return this.commit(mutate, { notify: () => true, loud: true });
   }
 
-  private async reload(): Promise<void> {
-    const root = this.root;
-    if (!root) {
-      return;
-    }
-    this.sessions.clear();
-    this.lastWritten.clear();
+  // --- sessions ------------------------------------------------------------
 
-    const indexUri = vscode.Uri.joinPath(root, INDEX_FILE);
-    const indexText = await this.readText(indexUri);
-    if (indexText !== undefined) {
-      try {
-        const parsed = JSON.parse(indexText) as ReviewIndexData & { activeRoundId?: string };
-        this.index = {
-          version: INDEX_FORMAT_VERSION,
-          activeSessionId: parsed.activeSessionId ?? parsed.activeRoundId,
-        };
-        this.lastWritten.set(indexUri.toString(), indexText);
-      } catch {
-        this.index = { version: INDEX_FORMAT_VERSION };
-      }
-    } else {
-      this.index = { version: INDEX_FORMAT_VERSION };
-    }
-
-    let sessionsUri = vscode.Uri.joinPath(root, SESSIONS_DIR);
-    let entries = await this.readDir(sessionsUri);
-    if (entries.length === 0) {
-      const legacyUri = vscode.Uri.joinPath(root, LEGACY_SESSIONS_DIR);
-      const legacy = await this.readDir(legacyUri);
-      if (legacy.length > 0) {
-        sessionsUri = legacyUri;
-        entries = legacy;
-      }
-    }
-    for (const [name, type] of entries) {
-      if (type !== vscode.FileType.File || !name.endsWith('.json')) {
-        continue;
-      }
-      const uri = vscode.Uri.joinPath(sessionsUri, name);
-      const text = await this.readText(uri);
-      if (text === undefined) {
-        continue;
-      }
-      try {
-        const session = normalizeSession(JSON.parse(text) as ReviewSessionData, name.replace(/\.json$/, ''));
-        this.sessions.set(session.id, session);
-        this.lastWritten.set(uri.toString(), text);
-      } catch {
-        void vscode.window.showWarningMessage(`Local Review: could not parse ${SESSIONS_DIR}/${name}.`);
-      }
-    }
-
-    if (this.index.activeSessionId && !this.sessions.has(this.index.activeSessionId)) {
-      this.index.activeSessionId = undefined;
-    }
-    if (!this.index.activeSessionId) {
-      const fallback = this.allSessions.find((r) => r.status === 'open');
-      if (fallback) {
-        this.index.activeSessionId = fallback.id;
-      }
-    }
-  }
-
-  // --- writing -------------------------------------------------------------
-
-  private sessionUri(id: string): vscode.Uri {
-    return vscode.Uri.joinPath(this.root!, SESSIONS_DIR, `${id}.json`);
-  }
-
-  private scheduleWrite(uri: vscode.Uri, content: string): void {
-    const key = uri.toString();
-    const existing = this.pendingSaves.get(key);
-    if (existing) {
-      clearTimeout(existing);
-    }
-    this.pendingSaves.set(
-      key,
-      setTimeout(() => {
-        this.pendingSaves.delete(key);
-        void this.writeNow(uri, content);
-      }, 150),
-    );
-  }
-
-  private async writeNow(uri: vscode.Uri, content: string): Promise<void> {
-    try {
-      log('write file', { file: uri.path.split('/').pop() });
-      this.lastWritten.set(uri.toString(), content);
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-    } catch (err) {
-      void vscode.window.showErrorMessage(`Local Review: failed to write ${uri.fsPath}: ${String(err)}`);
-    }
-  }
-
-  private persistSession(session: ReviewSessionData): void {
-    if (!this.root) {
-      return;
-    }
-    session.threads.sort(compareThreads);
-    this.scheduleWrite(this.sessionUri(session.id), `${JSON.stringify(session, null, 2)}\n`);
-  }
-
-  private persistIndex(): void {
-    if (!this.root) {
-      return;
-    }
-    const uri = vscode.Uri.joinPath(this.root, INDEX_FILE);
-    this.scheduleWrite(uri, `${JSON.stringify(this.index, null, 2)}\n`);
-  }
-
-  /**
-   * Writes every pending change synchronously. Called from `deactivate`, where
-   * awaiting anything delays the host teardown and leaves comment widgets
-   * stranded in the editor.
-   */
-  flushSync(): void {
-    const pending = new Set(this.pendingSaves.keys());
-    for (const [, timer] of this.pendingSaves) {
-      clearTimeout(timer);
-    }
-    this.pendingSaves.clear();
-    if (pending.size === 0 || !this.root || this.root.scheme !== 'file') {
-      return;
-    }
-    try {
-      fs.mkdirSync(path.join(this.root.fsPath, SESSIONS_DIR), { recursive: true });
-      for (const session of this.sessions.values()) {
-        const uri = this.sessionUri(session.id);
-        if (pending.has(uri.toString())) {
-          fs.writeFileSync(uri.fsPath, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
-        }
-      }
-      const indexUri = vscode.Uri.joinPath(this.root, INDEX_FILE);
-      if (pending.has(indexUri.toString())) {
-        fs.writeFileSync(indexUri.fsPath, `${JSON.stringify(this.index, null, 2)}\n`, 'utf8');
-      }
-    } catch {
-      // Shutting down: a failed last write is not worth blocking teardown.
-    }
-  }
-
-  private changed(): void {
-    log('store: changed');
-    this.onDidChangeEmitter.fire();
-  }
-
-  // --- sessions --------------------------------------------------------------
-
-  async createSession(name?: string): Promise<ReviewSessionData> {
-    if (!this.root) {
-      throw new Error('Open a folder before starting a review session.');
-    }
-    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.root, SESSIONS_DIR));
-    let id = sessionId();
-    let suffix = 1;
-    while (this.sessions.has(id)) {
-      id = `${sessionId()}-${++suffix}`;
-    }
-    const session: ReviewSessionData = {
-      version: SESSION_FORMAT_VERSION,
-      id,
-      name: name?.trim() || `Session ${this.sessions.size + 1}`,
-      status: 'open',
-      createdAt: nowIso(),
-      base: await gitBase(),
-      threads: [],
-    };
-    this.sessions.set(session.id, session);
-    this.index.activeSessionId = session.id;
-    this.persistSession(session);
-    this.persistIndex();
-    this.changed();
-    return session;
+  async createSession(name?: string): Promise<ReviewSessionData | undefined> {
+    const base = await gitBase();
+    return this.apply((state) => ops.createSession(state, name, base, true));
   }
 
   async renameSession(id: string, name: string): Promise<void> {
-    const session = this.sessions.get(id);
-    if (!session) {
-      return;
-    }
-    session.name = name.trim() || session.name;
-    this.persistSession(session);
-    this.changed();
+    this.apply((state) => ops.renameSession(state, id, name));
   }
 
   setActiveSession(id: string): void {
-    if (!this.sessions.has(id)) {
-      return;
-    }
-    this.index.activeSessionId = id;
-    this.persistIndex();
-    this.changed();
+    this.apply((state) => ops.setActiveSession(state, id));
   }
 
   setSessionStatus(id: string, status: ReviewSessionData['status']): void {
-    const session = this.sessions.get(id);
-    if (!session || session.status === status) {
-      return;
-    }
-    session.status = status;
-    session.closedAt = status === 'closed' ? nowIso() : undefined;
-    if (status === 'closed' && this.index.activeSessionId === id) {
-      const next = this.allSessions.find((r) => r.status === 'open');
-      this.index.activeSessionId = next?.id;
-      this.persistIndex();
-    }
-    if (status === 'open') {
-      this.index.activeSessionId = id;
-      this.persistIndex();
-    }
-    this.persistSession(session);
-    this.changed();
+    this.apply((state) => ops.setSessionStatus(state, id, status));
   }
 
   async deleteSession(id: string): Promise<void> {
-    const session = this.sessions.get(id);
-    if (!session || !this.root) {
-      return;
-    }
-    this.sessions.delete(id);
-    const uri = this.sessionUri(id);
-    this.lastWritten.delete(uri.toString());
-    try {
-      await vscode.workspace.fs.delete(uri);
-    } catch {
-      // already gone
-    }
-    if (this.index.activeSessionId === id) {
-      this.index.activeSessionId = this.allSessions.find((r) => r.status === 'open')?.id;
-    }
-    this.persistIndex();
-    this.changed();
+    this.apply((state) => ops.deleteSession(state, id));
   }
 
   // --- threads & comments --------------------------------------------------
 
-  async addThread(
-    sessionIdValue: string,
-    input: Omit<ReviewThreadData, 'id' | 'status' | 'createdAt' | 'updatedAt' | 'comments'> & {
-      comments: Omit<ReviewCommentData, 'id' | 'createdAt'>[];
-    },
-  ): Promise<ReviewThreadData | undefined> {
-    const session = this.sessions.get(sessionIdValue);
-    if (!session) {
-      return undefined;
-    }
-    const timestamp = nowIso();
-    const thread: ReviewThreadData = {
-      id: newId('thread'),
-      path: input.path,
-      startLine: input.startLine,
-      endLine: input.endLine,
-      snippet: input.snippet,
-      languageId: input.languageId,
-      status: 'open',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      comments: input.comments.map((c) => ({ ...c, id: newId('comment'), createdAt: timestamp })),
-    };
-    session.threads.push(thread);
-    this.persistSession(session);
-    this.changed();
-    return thread;
+  async addThread(sessionId: string, input: ops.NewThreadInput) {
+    return this.apply((state) => ops.addThread(state, sessionId, input));
   }
 
   addComment(threadId: string, author: string, body: string): ReviewCommentData | undefined {
-    const found = this.findThread(threadId);
-    if (!found) {
-      return undefined;
-    }
-    const comment: ReviewCommentData = { id: newId('comment'), author, body, createdAt: nowIso() };
-    found.thread.comments.push(comment);
-    found.thread.updatedAt = comment.createdAt;
-    this.persistSession(found.session);
-    this.changed();
-    return comment;
+    return this.apply((state) => ops.addComment(state, threadId, author, body, false));
   }
 
   updateComment(commentId: string, body: string): void {
-    const found = this.findComment(commentId);
-    if (!found || found.comment.body === body) {
-      return;
-    }
-    found.comment.body = body;
-    found.comment.updatedAt = nowIso();
-    found.thread.updatedAt = found.comment.updatedAt;
-    this.persistSession(found.session);
-    this.changed();
+    this.apply((state) => ops.updateComment(state, commentId, body));
   }
 
-  /** Deleting a thread's last comment deletes the thread. */
   deleteComment(commentId: string): void {
-    const found = this.findComment(commentId);
-    if (!found) {
-      return;
-    }
-    found.thread.comments.splice(found.index, 1);
-    if (found.thread.comments.length === 0) {
-      found.session.threads = found.session.threads.filter((t) => t.id !== found.thread.id);
-    } else {
-      found.thread.updatedAt = nowIso();
-    }
-    this.persistSession(found.session);
-    this.changed();
+    this.apply((state) => ops.deleteComment(state, commentId));
   }
 
   deleteThread(threadId: string): void {
-    const found = this.findThread(threadId);
-    if (!found) {
-      return;
-    }
-    found.session.threads = found.session.threads.filter((t) => t.id !== threadId);
-    this.persistSession(found.session);
-    this.changed();
+    this.apply((state) => ops.deleteThread(state, threadId));
   }
 
   setThreadStatus(threadId: string, status: ThreadStatus): void {
-    const found = this.findThread(threadId);
-    if (!found || found.thread.status === status) {
-      return;
-    }
-    found.thread.status = status;
-    found.thread.updatedAt = nowIso();
-    this.persistSession(found.session);
-    this.changed();
+    this.apply((state) => ops.setThreadStatus(state, threadId, status));
   }
 
   /**
-   * Re-anchors a thread after the file it points at was edited. Silent: the
-   * editor already shows the moved thread, and firing a change here would tear
-   * down the widget the user is typing in.
+   * Re-anchors a thread after its file was edited. Deliberately does not fire a
+   * change event: the editor already shows the moved thread, and re-rendering
+   * would tear down a widget the user may be typing in.
    */
   updateAnchor(threadId: string, startLine: number, endLine: number, snippet: string[]): boolean {
-    const found = this.findThread(threadId);
-    if (!found) {
-      return false;
+    return (
+      this.commit((s) => ops.updateAnchor(s, threadId, startLine, endLine, snippet), {
+        notify: () => false,
+        loud: false,
+      }) === true
+    );
+  }
+
+  /**
+   * Re-points every thread at where its captured code now lives. The editor
+   * tracks ranges for files that are open; this covers everything else — most
+   * importantly files an agent rewrote while they were closed.
+   */
+  reanchor(readLines: ReadLines, onlyPath?: string): boolean {
+    const moved = this.commit((s) => reanchorAll(s, readLines, onlyPath), {
+      notify: (result) => result === true,
+      loud: false,
+    });
+    if (moved) {
+      log('reanchored threads');
     }
-    const { thread } = found;
-    const sameSnippet =
-      thread.snippet.length === snippet.length && thread.snippet.every((l, i) => l === snippet[i]);
-    if (thread.startLine === startLine && thread.endLine === endLine && sameSnippet) {
-      return false;
-    }
-    thread.startLine = startLine;
-    thread.endLine = endLine;
-    thread.snippet = snippet;
-    this.persistSession(found.session);
-    return true;
+    return moved === true;
   }
 
   dispose(): void {
@@ -518,10 +289,6 @@ export class ReviewStore implements vscode.Disposable {
       return;
     }
     this.disposed = true;
-    for (const [, timer] of this.pendingSaves) {
-      clearTimeout(timer);
-    }
-    this.pendingSaves.clear();
     this.watcher?.dispose();
     this.onDidChangeEmitter.dispose();
     for (const d of this.disposables) {
@@ -530,43 +297,16 @@ export class ReviewStore implements vscode.Disposable {
   }
 }
 
-function compareThreads(a: ReviewThreadData, b: ReviewThreadData): number {
-  return a.path.localeCompare(b.path) || a.startLine - b.startLine || a.createdAt.localeCompare(b.createdAt);
+function emptyState(): StoreState {
+  return {
+    index: { version: INDEX_FORMAT_VERSION },
+    sessions: new Map(),
+    sources: new Map(),
+    readOnly: new Map(),
+  };
 }
 
-/** Repairs sessions that were hand-edited, so a missing field never breaks the view. */
-function normalizeSession(raw: Partial<ReviewSessionData>, fallbackId: string): ReviewSessionData {
-  const threads = Array.isArray(raw.threads) ? raw.threads : [];
-  return {
-    version: raw.version ?? SESSION_FORMAT_VERSION,
-    id: raw.id || fallbackId,
-    name: raw.name || fallbackId,
-    status: raw.status === 'closed' ? 'closed' : 'open',
-    createdAt: raw.createdAt || new Date(0).toISOString(),
-    closedAt: raw.closedAt,
-    base: raw.base,
-    threads: threads
-      .filter((t): t is ReviewThreadData => Boolean(t && t.path))
-      .map((t): ReviewThreadData => ({
-        id: t.id || newId('thread'),
-        path: t.path,
-        startLine: Math.max(1, Number(t.startLine) || 1),
-        endLine: Math.max(1, Number(t.endLine) || Number(t.startLine) || 1),
-        snippet: Array.isArray(t.snippet) ? t.snippet : [],
-        languageId: t.languageId,
-        status: t.status === 'resolved' ? 'resolved' : 'open',
-        createdAt: t.createdAt || new Date(0).toISOString(),
-        updatedAt: t.updatedAt || t.createdAt || new Date(0).toISOString(),
-        comments: (Array.isArray(t.comments) ? t.comments : [])
-          .filter((c): c is ReviewCommentData => Boolean(c && typeof c.body === 'string'))
-          .map((c): ReviewCommentData => ({
-            id: c.id || newId('comment'),
-            author: c.author || 'unknown',
-            body: c.body,
-            createdAt: c.createdAt || new Date(0).toISOString(),
-            updatedAt: c.updatedAt,
-          })),
-      }))
-      .sort(compareThreads),
-  };
+/** Cheap value-identity of the whole store, for detecting a missed change. */
+function snapshot(state: StoreState): string {
+  return JSON.stringify([state.index, [...state.sessions.values()]]);
 }

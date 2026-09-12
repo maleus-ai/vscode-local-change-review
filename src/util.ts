@@ -1,34 +1,16 @@
 import { execFile } from 'child_process';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { formatTimestamp, lineLabel, relativeShort, relativeTime, splitLines, toPosix } from './core/format';
 import type { ReviewSessionBase } from './types';
 
+// Re-exported so extension-side modules keep a single import site.
+export { formatTimestamp, lineLabel, relativeShort, relativeTime, splitLines, toPosix };
+
 export const CONTROLLER_ID = 'localChangeReview';
-
-export function nowIso(): string {
-  return new Date().toISOString();
-}
-
-let idCounter = 0;
-export function newId(prefix: string): string {
-  idCounter = (idCounter + 1) % 0xffff;
-  const random = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
-  return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}${random}`;
-}
-
-export function sessionId(date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const stamp =
-    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
-    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
-  return `session-${stamp}`;
-}
-
-export function toPosix(p: string): string {
-  return p.split(path.sep).join('/');
-}
 
 export function config(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration('localReview');
@@ -80,22 +62,6 @@ export function fromRange(range: vscode.Range): { startLine: number; endLine: nu
   return { startLine: range.start.line + 1, endLine: range.end.line + 1 };
 }
 
-export function formatTimestamp(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) {
-    return iso;
-  }
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  );
-}
-
-export function lineLabel(startLine: number, endLine: number): string {
-  return startLine === endLine ? `${startLine}` : `${startLine}-${endLine}`;
-}
-
 function run(cmd: string, args: string[], cwd: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile(cmd, args, { cwd, timeout: 5000 }, (err, stdout) => {
@@ -120,8 +86,21 @@ export async function resolveAuthor(): Promise<string> {
   return cachedAuthor;
 }
 
-export function invalidateAuthorCache(): void {
+/**
+ * Forgets the resolved author and works out the new one.
+ *
+ * Awaitable on purpose: clearing the cache without re-resolving left
+ * `currentAuthor()` empty until the next comment was posted, and everything
+ * that renders unread counts reads it synchronously.
+ */
+export async function invalidateAuthorCache(): Promise<string> {
   cachedAuthor = undefined;
+  return resolveAuthor();
+}
+
+/** The local author, without awaiting — for rendering. Empty until resolved. */
+export function currentAuthor(): string {
+  return config().get<string>('author', '').trim() || cachedAuthor || '';
 }
 
 /** Best-effort git snapshot recorded when a session starts. Absent outside a repo. */
@@ -148,7 +127,7 @@ export async function gitBase(): Promise<ReviewSessionBase | undefined> {
 export async function readLines(uri: vscode.Uri): Promise<string[] | undefined> {
   const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
   if (open) {
-    return open.getText().split(/\r?\n/);
+    return splitLines(open.getText());
   }
   try {
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -165,4 +144,22 @@ export function languageIdFor(uri: vscode.Uri): string | undefined {
   }
   const ext = path.extname(uri.fsPath).slice(1).toLowerCase();
   return ext || undefined;
+}
+
+/**
+ * Reads a reviewed file's lines synchronously, preferring the in-memory
+ * document so unsaved edits are respected. Used for re-anchoring, which must
+ * run inside a lock and therefore cannot await.
+ */
+export function readLinesSync(storedPath: string): string[] | undefined {
+  const uri = resolvePath(storedPath);
+  const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  if (open) {
+    return splitLines(open.getText());
+  }
+  try {
+    return splitLines(fs.readFileSync(uri.fsPath, 'utf8'));
+  } catch {
+    return undefined;
+  }
 }
