@@ -100,19 +100,22 @@ function toStoredPath(input: string): string | undefined {
  * every other read, including reads that named a perfectly healthy session. So
  * a refused write degrades to an in-memory re-anchor: accurate line numbers,
  * nothing written, and the quarantine still protecting the file.
+ *
+ * `recapture: false` throughout. Line numbers and the outdated flag are facts
+ * about where the code is, and worth recording; the snippet is the record of
+ * what the review is about, and an agent reading a review has no business
+ * rewriting that.
  */
 function readFresh(): StoreState {
-  try {
-    return files.transaction((state) => {
-      ops.reconcileActiveSession(state);
-      reanchorAll(state, readLines);
-      return state;
-    }).state;
-  } catch {
-    const state = files.read();
+  const refresh = (state: StoreState): StoreState => {
     ops.reconcileActiveSession(state);
-    reanchorAll(state, readLines);
+    reanchorAll(state, readLines, { recapture: false });
     return state;
+  };
+  try {
+    return files.transaction(refresh).state;
+  } catch {
+    return refresh(files.read());
   }
 }
 
@@ -137,6 +140,26 @@ function summariseSession(session: ReviewSessionData) {
   };
 }
 
+/**
+ * What a detached thread was written about, or undefined while it is anchored.
+ *
+ * `startLine`/`endLine` on a detached thread are a last known position clamped
+ * to the file's length — they point at whatever now occupies them, which is not
+ * the code the comment is about. These are the numbers and the source as they
+ * were when the thread was opened, so the comment stays readable.
+ */
+function originalOf(thread: ReviewThreadData) {
+  if (thread.outdated !== true) {
+    return undefined;
+  }
+  return {
+    startLine: thread.originalStartLine ?? thread.startLine,
+    endLine: thread.originalEndLine ?? thread.endLine,
+    snippet: shownSnippet(thread),
+    note: 'The code this comment was written about is no longer in the file. These are the lines and the source as they were when the thread was opened; startLine/endLine above are a last known position and point at unrelated code.',
+  };
+}
+
 /** Id, location and one line — enough to choose what to open, at a fraction of the tokens. */
 function compactThread(session: ReviewSessionData, thread: ReviewThreadData) {
   const last = thread.comments[thread.comments.length - 1];
@@ -147,7 +170,11 @@ function compactThread(session: ReviewSessionData, thread: ReviewThreadData) {
     startLine: thread.startLine,
     endLine: thread.endLine,
     status: thread.status,
-    outdated: thread.status !== 'resolved' && thread.outdated === true,
+    // Reported truthfully even on a resolved thread. `resolved` supersedes
+    // `outdated` in what the editor LABELS, so a thread already dealt with does
+    // not also nag — but an agent needs the fact, and the tool description
+    // promises it.
+    outdated: thread.outdated === true,
     author: thread.comments[0]?.author,
     // Null, not false: a comment written before the flag existed is unknown, and
     // reporting it as human hands an agent its own comments back.
@@ -156,6 +183,10 @@ function compactThread(session: ReviewSessionData, thread: ReviewThreadData) {
     lastAuthor: last?.author,
     lastFromAgent: last?.agent ?? null,
     summary: summaryLine(thread.comments[0]?.body ?? ''),
+    original: originalOf(thread) && {
+      startLine: thread.originalStartLine ?? thread.startLine,
+      endLine: thread.originalEndLine ?? thread.endLine,
+    },
   };
 }
 
@@ -167,7 +198,8 @@ function summariseThread(session: ReviewSessionData, thread: ReviewThreadData) {
     startLine: thread.startLine,
     endLine: thread.endLine,
     status: thread.status,
-    outdated: thread.status !== 'resolved' && thread.outdated === true,
+    outdated: thread.outdated === true,
+    original: originalOf(thread),
     author: thread.comments[0]?.author,
     comments: thread.comments.map((c) => ({
       id: c.id,
@@ -217,7 +249,7 @@ server.registerTool(
   {
     title: 'List review threads',
     description:
-      'Lists review threads with their comments. Line numbers are re-anchored to the current file contents before returning, so they are accurate even if the code moved. A thread marked outdated is one whose commented code could no longer be found.',
+      'Lists review threads with their comments. Line numbers are re-anchored to the current file contents before returning, so they are accurate even if the code moved. A thread marked outdated is one whose commented code could no longer be found: its startLine/endLine point at unrelated code, and its `original` gives the lines and the source as they were when the comment was written.',
     inputSchema: {
       sessionId: z.string().optional().describe('Defaults to the active session'),
       file: z.string().optional().describe('Only threads anchored in this file'),
@@ -292,13 +324,9 @@ server.registerTool(
     if (!found) {
       return fail(`No thread ${threadId}.`);
     }
-    return text({
-      ...summariseThread(found.session, found.thread),
-      // What it was opened on once the code it sat on is gone, so an agent
-      // reading the thread sees what the comment is about rather than whatever
-      // now occupies those line numbers.
-      snippet: shownSnippet(found.thread),
-    });
+    // `snippet` is what the thread is about — which, once the code is gone, is
+    // what it was opened on rather than whatever now occupies those lines.
+    return text({ ...summariseThread(found.session, found.thread), snippet: shownSnippet(found.thread) });
   },
 );
 

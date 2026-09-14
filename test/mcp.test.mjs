@@ -80,8 +80,13 @@ fs.writeFileSync(SRC, `export class Something Else {}\n`);
 const gone = J(await client.callTool({ name: 'list_threads', arguments: { status: 'all' } }));
 check('marks open threads outdated when the code vanishes',
   gone.threads.filter((t) => t.status === 'open').every((t) => t.outdated === true));
-check('resolved threads are never marked outdated',
-  gone.threads.filter((t) => t.status === 'resolved').every((t) => t.outdated === false));
+// The editor lets `resolved` supersede `outdated` in what it LABELS, so a thread
+// already dealt with does not also nag. The MCP reports the fact either way: an
+// agent needs to know the code is gone, and the tool description promises it.
+const resolvedGone = gone.threads.filter((t) => t.status === 'resolved');
+check('resolved threads report outdated truthfully',
+  resolvedGone.length > 0 && resolvedGone.every((t) => t.outdated === true),
+  `${resolvedGone.length} resolved, outdated: ${resolvedGone.map((t) => t.outdated).join(', ')}`);
 
 // --- agent provenance
 const provenance = J(await client.callTool({ name: 'list_threads', arguments: { status: 'all' } }));
@@ -173,6 +178,46 @@ fs.writeFileSync(path.join(root, '.local-review', 'sessions', 'broken.json'), JS
 const stillReads = await client.callTool({ name: 'list_threads', arguments: { sessionId: session.id, status: 'all' } });
 check('a quarantined session does not break reads of a healthy one', stillReads.isError !== true,
   stillReads.isError ? stillReads.content[0].text.slice(0, 70) : '');
+
+// --- an outdated thread: the agent is told, and handed what it was about
+{
+  const store = new ReviewFiles(path.join(root, '.local-review'));
+  store.transaction((state) => {
+    state.sessions.get(session.id).threads.push({
+      id: 't-gone', path: 'src/billing.ts', startLine: 2, endLine: 2,
+      snippet: ["const GONE = 'nowhere';"], original: ["const GONE = 'nowhere';"],
+      originalStartLine: 77, originalEndLine: 77, languageId: 'typescript', status: 'open',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      comments: [{ id: 'c-gone', author: 'Shiranuit', body: 'must survive', createdAt: '2026-01-01T00:00:00.000Z' }],
+    });
+  });
+  const onDiskBefore = JSON.stringify(
+    new ReviewFiles(path.join(root, '.local-review')).read().sessions.get(session.id)
+      .threads.find((t) => t.id === 't-gone').snippet);
+
+  const gone = J(await client.callTool({ name: 'list_threads', arguments: { status: 'all' } }))
+    .threads.find((t) => t.threadId === 't-gone');
+  check('an outdated thread says so', gone.outdated === true);
+  check('and carries the lines it was written about',
+    gone.original.startLine === 77 && gone.original.endLine === 77, JSON.stringify(gone.original));
+  check('and the source it was written about',
+    gone.original.snippet[0] === "const GONE = 'nowhere';", JSON.stringify(gone.original.snippet));
+  check('get_thread returns that source as the snippet',
+    J(await client.callTool({ name: 'get_thread', arguments: { threadId: 't-gone' } })).snippet[0]
+      === "const GONE = 'nowhere';");
+  fs.writeFileSync(path.join(root, 'src', 'anchored.ts'), 'export const kept = 1;\n');
+  const live = J(await client.callTool({ name: 'create_thread', arguments: {
+    file: 'src/anchored.ts', startLine: 1, endLine: 1, body: 'still here' } }));
+  check('an anchored thread carries no original block',
+    J(await client.callTool({ name: 'get_thread', arguments: { threadId: live.threadId } })).original === undefined);
+
+  // Reading a review must not rewrite the record of what it is about.
+  const onDiskAfter = JSON.stringify(
+    new ReviewFiles(path.join(root, '.local-review')).read().sessions.get(session.id)
+      .threads.find((t) => t.id === 't-gone').snippet);
+  check('reading through the MCP never rewrites a snippet', onDiskAfter === onDiskBefore,
+    `${onDiskBefore} -> ${onDiskAfter}`);
+}
 
 await client.close();
 fs.rmSync(outside, { force: true });

@@ -2,7 +2,7 @@
   "name": "local-change-review",
   "displayName": "Local Change Review",
   "description": "Review local (uncommitted) changes with GitHub-PR-style inline comments, organised into review sessions, exportable as Markdown or JSON for handing to an LLM.",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "publisher": "shiranuit",
   "license": "MIT",
   "repository": {

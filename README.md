@@ -199,6 +199,8 @@ A session file:
       "endLine": 36,
       "snippet": ["export class AssistantBillingService {", "  constructor("],
       "original": ["export class AssistantBillingService {", "  constructor("],
+      "originalStartLine": 33,
+      "originalEndLine": 36,
       "languageId": "typescript",
       "status": "open",
       "createdAt": "…",
@@ -223,9 +225,14 @@ anchor never follows the editor's tracked range onto something else, because a
 range is not a claim about content. When the code can no longer be found the
 thread is marked `outdated`, keeps its last known position, and stops moving.
 
-`original` is what the thread was opened on, written once and never rewritten.
-It is what the editor and the exports show for an outdated thread, so a comment
+`original`, `originalStartLine` and `originalEndLine` are what the thread was
+opened on and where it sat, written once and never rewritten. They are what the
+editor, the exports and the MCP server show for an outdated thread, so a comment
 is still readable long after the code it was about has gone.
+
+The MCP server never rewrites a snippet. Reading a review refreshes line numbers
+and the `outdated` flag — facts about where the code is — but the record of what
+the review is *about* is only ever written by the editor.
 
 Add `.local-review/` to `.gitignore` if you'd rather not commit reviews, or commit them if you want the history.
 

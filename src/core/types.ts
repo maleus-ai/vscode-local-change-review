@@ -37,13 +37,17 @@ export interface ReviewThreadData {
    */
   snippet: string[];
   /**
-   * The code as it was when the thread was opened. Written once and never
-   * rewritten — it is the only record of what a comment was actually about, and
-   * `snippet` cannot serve that purpose because it tracks the code away.
+   * The code as it was when the thread was opened, and where it sat. Written
+   * once and never rewritten — the only record of what a comment was actually
+   * about, which `snippet`/`startLine` cannot be because they track the code as
+   * it moves, and are clamped to nothing in particular once it is gone.
    *
-   * Absent on threads created before this field existed; fall back to `snippet`.
+   * Absent on threads created before these fields existed; fall back to the
+   * live ones rather than inventing a value.
    */
   original?: string[];
+  originalStartLine?: number;
+  originalEndLine?: number;
   languageId?: string;
   status: ThreadStatus;
   /**

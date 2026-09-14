@@ -135,12 +135,28 @@ function sameLines(a: string[], b: string[]): boolean {
  */
 export type ReadLines = (relativePath: string) => string[] | null | undefined;
 
+export interface ReanchorOptions {
+  /** Limit the work to one file — saving one file has no bearing on the rest. */
+  onlyPath?: string;
+  /**
+   * Whether a match may refresh the stored snippet. A match is exact or
+   * whitespace-insensitive, so this only ever absorbs reindentation — but it is
+   * still a write, and the MCP server turns it off: an agent reading a review
+   * should not rewrite the record of what the review is about.
+   */
+  recapture?: boolean;
+}
+
 /**
- * Re-anchors threads against the current contents of their file. Pass
- * `onlyPath` to limit the work to one file — saving one file has no bearing on
- * threads anchored in any other. Returns true if anything moved.
+ * Re-anchors threads against the current contents of their file. Returns true
+ * if anything moved.
  */
-export function reanchorAll(state: StoreState, readLines: ReadLines, onlyPath?: string): boolean {
+export function reanchorAll(
+  state: StoreState,
+  readLines: ReadLines,
+  options: ReanchorOptions = {},
+): boolean {
+  const { onlyPath, recapture = true } = options;
   const cache = new Map<string, string[] | null | undefined>();
   let changed = false;
 
@@ -210,7 +226,9 @@ export function reanchorAll(state: StoreState, readLines: ReadLines, onlyPath?: 
       // whatever happens to sit there now, which is the same unrecoverable loss
       // the not-found branch below refuses to commit.
       const nextSnippet =
-        thread.snippet.length === 0 ? thread.snippet : lines.slice(anchor.startLine - 1, anchor.endLine);
+        recapture && thread.snippet.length > 0
+          ? lines.slice(anchor.startLine - 1, anchor.endLine)
+          : thread.snippet;
       if (
         anchor.startLine !== thread.startLine ||
         anchor.endLine !== thread.endLine ||

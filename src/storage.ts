@@ -274,7 +274,7 @@ export class ReviewStore implements vscode.Disposable {
    * importantly files an agent rewrote while they were closed.
    */
   reanchor(readLines: ReadLines, onlyPath?: string): boolean {
-    const moved = this.commit((s) => reanchorAll(s, readLines, onlyPath), {
+    const moved = this.commit((s) => reanchorAll(s, readLines, { onlyPath }), {
       notify: (result) => result === true,
       loud: false,
     });

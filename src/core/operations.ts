@@ -178,6 +178,8 @@ export function addThread(
     endLine: input.endLine,
     snippet: input.snippet,
     original: input.snippet,
+    originalStartLine: input.startLine,
+    originalEndLine: input.endLine,
     languageId: input.languageId,
     status: 'open',
     createdAt: timestamp,

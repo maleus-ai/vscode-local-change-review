@@ -304,6 +304,8 @@ export function normalizeSession(
         keep(t.outdated !== undefined, typeof t.outdated === 'boolean');
         keep(t.snippet !== undefined, Array.isArray(t.snippet));
         keep(t.original !== undefined, Array.isArray(t.original));
+        keep(t.originalStartLine !== undefined, Number.isFinite(Number(t.originalStartLine)));
+        keep(t.originalEndLine !== undefined, Number.isFinite(Number(t.originalEndLine)));
         keep(t.comments !== undefined, Array.isArray(t.comments));
         keep(t.startLine !== undefined, Number.isFinite(Number(t.startLine)));
         keep(t.endLine !== undefined, Number.isFinite(Number(t.endLine)));
@@ -319,6 +321,8 @@ export function normalizeSession(
           // have tracked the code somewhere else. Guessing would make a wrong
           // answer look authoritative.
           original: Array.isArray(t.original) ? t.original : undefined,
+          originalStartLine: positiveOrUndefined(t.originalStartLine),
+          originalEndLine: positiveOrUndefined(t.originalEndLine),
           languageId: t.languageId,
           status: t.status === 'resolved' ? 'resolved' : 'open',
           outdated: t.outdated === true ? true : undefined,
@@ -346,6 +350,12 @@ export function normalizeSession(
       .sort(compareThreads),
   };
   return { session, lossless };
+}
+
+/** Left absent rather than repaired: an invented origin is worse than none. */
+function positiveOrUndefined(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined;
 }
 
 function keptComments(
