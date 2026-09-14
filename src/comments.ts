@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import * as vscode from 'vscode';
 
 import { log } from './log';
+import { outdatedSnippetNotice, shownSnippet } from './core/export';
 import { splitLines } from './core/format';
 import { Identities } from './identities';
 import type { ReviewStore, ThreadLocation } from './storage';
@@ -24,6 +25,12 @@ export class ReviewComment implements vscode.Comment {
   label?: string;
   /** The last persisted text, kept so "Cancel" can restore it after an edit. */
   savedBody: string;
+  /**
+   * Markdown rendered above the comment text and never part of it — currently
+   * the snippet of a thread that has come unanchored. Kept separate so editing
+   * shows the author's own words and saving cannot persist what we added.
+   */
+  displayPrefix = '';
 
   constructor(
     readonly commentId: string,
@@ -262,18 +269,23 @@ export class ReviewCommentsController implements vscode.Disposable {
     session: ReviewSessionData,
     data: ReviewThreadData,
   ): ReviewComment[] {
-    return data.comments.map((c) => {
+    // On the first comment only: the thread is one conversation about one
+    // snippet, and repeating it above every reply would bury them.
+    const notice = outdatedSnippetNotice(data);
+    return data.comments.map((c, index) => {
+      const prefix = index === 0 ? (notice ?? '') : '';
       const comment = new ReviewComment(
         c.id,
         data.id,
         session.id,
-        new vscode.MarkdownString(c.body),
+        new vscode.MarkdownString(prefix + c.body),
         vscode.CommentMode.Preview,
         { name: this.identities.displayName(c.author), iconPath: this.identities.forAuthor(c.author) },
         new Date(c.updatedAt ?? c.createdAt),
         data.status,
         c.body,
       );
+      comment.displayPrefix = prefix;
       if (c.agent) {
         comment.label = 'Agent';
       }
@@ -567,7 +579,8 @@ export class ReviewCommentsController implements vscode.Disposable {
     }
     live.comments = live.comments.map((c) => {
       if (c instanceof ReviewComment && c.commentId === comment.commentId) {
-        c.savedBody = bodyText(c.body);
+        // `savedBody` is already the persisted text. Recomputing it from what is
+        // displayed would fold `displayPrefix` into the comment and then save it.
         c.body = c.savedBody;
         c.mode = vscode.CommentMode.Editing;
       }
@@ -594,6 +607,7 @@ export class ReviewCommentsController implements vscode.Disposable {
     }
     comment.mode = vscode.CommentMode.Preview;
     comment.savedBody = text;
+    comment.body = new vscode.MarkdownString(comment.displayPrefix + text);
     if (live) {
       live.comments = [...live.comments];
     }
@@ -604,7 +618,7 @@ export class ReviewCommentsController implements vscode.Disposable {
 
   cancelEdit(comment: ReviewComment): void {
     const live = this.live.get(comment.threadId);
-    comment.body = new vscode.MarkdownString(comment.savedBody);
+    comment.body = new vscode.MarkdownString(comment.displayPrefix + comment.savedBody);
     comment.mode = vscode.CommentMode.Preview;
     if (live) {
       live.comments = [...live.comments];
@@ -698,7 +712,12 @@ function sameLines(a: vscode.Range | undefined, b: vscode.Range): boolean {
  * leave the widget showing stale text.
  */
 function threadSignature(thread: ReviewThreadData): string {
+  // `outdated` and the snippet are in here because they are rendered into the
+  // first comment's body: without them the widget keeps showing the old text
+  // long after the thread has come unanchored, or recovered.
   const hash = createHash('sha1').update(thread.status);
+  hash.update('\u0000').update(thread.outdated === true ? '1' : '0');
+  hash.update('\u0000').update(shownSnippet(thread).join('\n'));
   for (const c of thread.comments) {
     hash.update('\u0000').update(c.id);
     hash.update('\u0000').update(c.updatedAt ?? c.createdAt);

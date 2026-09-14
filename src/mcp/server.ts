@@ -11,6 +11,7 @@ import {
   DEFAULT_MARKDOWN_OPTIONS,
   fileToMarkdown,
   sessionToMarkdown,
+  shownSnippet,
   threadToMarkdown,
 } from '../core/export';
 import { ReviewFiles, type StoreState } from '../core/files';
@@ -291,7 +292,13 @@ server.registerTool(
     if (!found) {
       return fail(`No thread ${threadId}.`);
     }
-    return text({ ...summariseThread(found.session, found.thread), snippet: found.thread.snippet });
+    return text({
+      ...summariseThread(found.session, found.thread),
+      // What it was opened on once the code it sat on is gone, so an agent
+      // reading the thread sees what the comment is about rather than whatever
+      // now occupies those line numbers.
+      snippet: shownSnippet(found.thread),
+    });
   },
 );
 

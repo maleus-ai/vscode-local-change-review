@@ -7,6 +7,7 @@ import type { UnreadTracker } from './unread';
 import { currentAuthor } from './util';
 import type { ReviewStore } from './storage';
 import type { ReviewSessionData, ReviewThreadData } from './types';
+import { shownSnippet } from './core/export';
 import { summaryLine } from './core/format';
 import { sessionUri, threadUri } from './decorations';
 import { formatTimestamp, lineLabel, relativeShort, relativeTime, resolvePath } from './util';
@@ -253,8 +254,9 @@ function summaryLabel(body: string): vscode.TreeItemLabel {
 function threadTooltip(thread: ReviewThreadData): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
   md.appendMarkdown(`\`${thread.path}:${lineLabel(thread.startLine, thread.endLine)}\`\n\n`);
-  if (thread.snippet.length) {
-    md.appendCodeblock(thread.snippet.slice(0, 12).join('\n'), thread.languageId);
+  const snippet = shownSnippet(thread);
+  if (snippet.length) {
+    md.appendCodeblock(snippet.slice(0, 12).join('\n'), thread.languageId);
   }
   for (const comment of thread.comments) {
     md.appendMarkdown(

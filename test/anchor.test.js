@@ -75,17 +75,20 @@ check('reanchorAll refreshes the snippet', t1.snippet[0] === 'export class Servi
 check('missing file marks the thread outdated', t2.outdated === true);
 check('second pass is a no-op', reanchorAll(state, (p) => (p === 'f.ts' ? body : undefined)) === false);
 
-// resolved supersedes outdated: its code being gone is the point
+// A resolved thread records that its code is gone — `resolved` supersedes
+// `outdated` in what the labels SHOW, but the fact is what lets the widget
+// explain why it is sitting on code it was never about.
 const resolvedState = { index: {}, sessions: new Map([['s', { id: 's', threads: [
   { ...thread(1, 1, ['vanished code']), id: 'r1', status: 'resolved' },
   { ...thread(1, 1, ['vanished code']), id: 'r2', status: 'open' },
 ] }]]) };
 reanchorAll(resolvedState, () => L('completely different content'));
 const [res, open] = resolvedState.sessions.get('s').threads;
-check('resolved thread not marked outdated', !res.outdated, JSON.stringify(res.outdated));
+check('resolved thread records that its code is gone', res.outdated === true, JSON.stringify(res.outdated));
 check('open thread still marked outdated', open.outdated === true);
 reanchorAll(resolvedState, () => undefined);
-check('resolved thread not flagged when the file is gone', !resolvedState.sessions.get('s').threads[0].outdated);
+check('resolved thread is flagged when the file is gone too',
+  resolvedState.sessions.get('s').threads[0].outdated === true);
 
 // the fast path must derive the end from the snippet, not trust a stale endLine
 a = locate(thread(2, 2, ['export class Service {', '  constructor(private readonly repo: Repo) {}']), body);
@@ -98,9 +101,9 @@ let st = { index: {}, sessions: new Map([['s', { id: 's', threads: [
 ] }]]) };
 reanchorAll(st, () => L(['p', 'q', 'r'].join('\n')));
 const [res2, open2] = st.sessions.get('s').threads;
-check('resolved thread with vanished code is left untouched',
-  res2.startLine === 5 && res2.endLine === 7 && res2.snippet[0] === 'old1' && !res2.outdated,
-  JSON.stringify({ s: res2.startLine, e: res2.endLine, snip: res2.snippet }));
+check('a resolved thread keeps its position and its snippet, and says the code is gone',
+  res2.startLine === 5 && res2.endLine === 7 && res2.snippet[0] === 'old1' && res2.outdated === true,
+  JSON.stringify({ s: res2.startLine, e: res2.endLine, snip: res2.snippet, outdated: res2.outdated }));
 check('open thread with vanished code keeps its snippet as the record',
   open2.outdated === true && open2.snippet[0] === 'old1', JSON.stringify(open2.snippet));
 

@@ -303,6 +303,7 @@ export function normalizeSession(
         keep(t.status !== undefined, t.status === 'open' || t.status === 'resolved');
         keep(t.outdated !== undefined, typeof t.outdated === 'boolean');
         keep(t.snippet !== undefined, Array.isArray(t.snippet));
+        keep(t.original !== undefined, Array.isArray(t.original));
         keep(t.comments !== undefined, Array.isArray(t.comments));
         keep(t.startLine !== undefined, Number.isFinite(Number(t.startLine)));
         keep(t.endLine !== undefined, Number.isFinite(Number(t.endLine)));
@@ -313,6 +314,11 @@ export function normalizeSession(
           startLine: Math.max(1, Number(t.startLine) || 1),
           endLine: Math.max(1, Number(t.endLine) || Number(t.startLine) || 1),
           snippet: Array.isArray(t.snippet) ? t.snippet : [],
+          // Never backfilled from `snippet`: an absent original means we do not
+          // know what the thread was opened on, and `snippet` may long since
+          // have tracked the code somewhere else. Guessing would make a wrong
+          // answer look authoritative.
+          original: Array.isArray(t.original) ? t.original : undefined,
           languageId: t.languageId,
           status: t.status === 'resolved' ? 'resolved' : 'open',
           outdated: t.outdated === true ? true : undefined,

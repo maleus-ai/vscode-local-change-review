@@ -30,8 +30,20 @@ export interface ReviewThreadData {
   /** 1-based, inclusive on both ends. */
   startLine: number;
   endLine: number;
-  /** The source lines the comment was anchored to, captured at write time. */
+  /**
+   * The source lines this thread currently sits on, refreshed as the code is
+   * edited. This is what re-anchoring searches for, so keeping it current is
+   * what lets a thread follow code through many small changes.
+   */
   snippet: string[];
+  /**
+   * The code as it was when the thread was opened. Written once and never
+   * rewritten — it is the only record of what a comment was actually about, and
+   * `snippet` cannot serve that purpose because it tracks the code away.
+   *
+   * Absent on threads created before this field existed; fall back to `snippet`.
+   */
+  original?: string[];
   languageId?: string;
   status: ThreadStatus;
   /**

@@ -31,12 +31,21 @@ function fenceFor(lines: string[]): string {
   return '`'.repeat(longest + 1);
 }
 
+/**
+ * The lines to show for a thread: what it sits on now, or — once that is no
+ * longer the code it was about — what it was opened on.
+ */
+export function shownSnippet(thread: ReviewThreadData): string[] {
+  return thread.outdated === true && thread.original?.length ? thread.original : thread.snippet;
+}
+
 function codeBlock(thread: ReviewThreadData, options: MarkdownOptions): string[] {
-  if (!options.includeCode || thread.snippet.length === 0) {
+  const snippet = shownSnippet(thread);
+  if (!options.includeCode || snippet.length === 0) {
     return [];
   }
-  const truncated = options.maxCodeLines > 0 && thread.snippet.length > options.maxCodeLines;
-  const shown = truncated ? thread.snippet.slice(0, options.maxCodeLines) : thread.snippet;
+  const truncated = options.maxCodeLines > 0 && snippet.length > options.maxCodeLines;
+  const shown = truncated ? snippet.slice(0, options.maxCodeLines) : snippet;
   const width = String(thread.startLine + shown.length - 1).length;
   const body = shown.map((line, i) =>
     options.includeLineNumbers
@@ -44,10 +53,61 @@ function codeBlock(thread: ReviewThreadData, options: MarkdownOptions): string[]
       : line,
   );
   if (truncated) {
-    body.push(`… ${thread.snippet.length - shown.length} more line(s) omitted`);
+    body.push(`… ${snippet.length - shown.length} more line(s) omitted`);
   }
   const fence = fenceFor(body);
   return [`${fence}${options.includeLineNumbers ? '' : thread.languageId ?? ''}`, ...body, fence];
+}
+
+/** How much of a detached snippet the comment widget shows before truncating. */
+const OUTDATED_SNIPPET_LINES = 20;
+
+/**
+ * The code a detached thread was written about, as Markdown, or undefined when
+ * the thread is still anchored to real code.
+ *
+ * Once `locate` cannot find the snippet, the thread's line numbers are stale
+ * and point at whatever now occupies them — so the widget sits on unrelated
+ * code with no way to see what was actually being discussed. The stored snippet
+ * is the only surviving record of that, exactly as GitHub keeps the diff hunk
+ * with the comment, and this is what puts it in front of the reader.
+ *
+ * Resolved threads get it too. `resolved` supersedes `outdated` in labels — a
+ * thread that has been dealt with should not also nag — but a resolved thread
+ * is the one most likely to have lost its code, and reading it later is exactly
+ * when you need to know what it was about.
+ */
+export function outdatedSnippetNotice(
+  thread: ReviewThreadData,
+  maxLines = OUTDATED_SNIPPET_LINES,
+): string | undefined {
+  const snippet = shownSnippet(thread);
+  if (thread.outdated !== true || snippet.length === 0) {
+    return undefined;
+  }
+  const truncated = maxLines > 0 && snippet.length > maxLines;
+  const shown = truncated ? snippet.slice(0, maxLines) : snippet;
+  const body = truncated
+    ? [...shown, `… ${snippet.length - shown.length} more line(s) omitted`]
+    : [...shown];
+  const fence = fenceFor(body);
+  return (
+    [
+      // Deliberately not the word "outdated": that is the label's job, and this
+      // has to read sensibly on a resolved thread as well.
+      '**Original code**',
+      '',
+      `${fence}${thread.languageId ?? ''}`,
+      ...body,
+      fence,
+    ]
+      // Quoted, so the whole thing renders inside one bordered, indented block
+      // and reads as context rather than as something the author wrote. A real
+      // box is not available: VS Code's markdown sanitiser keeps `style` only on
+      // `<span>`, and only for colours, so there is no CSS to draw one with.
+      .map((line) => (line ? `> ${line}` : '>'))
+      .join('\n') + '\n\n'
+  );
 }
 
 export function threadAnchor(thread: ReviewThreadData): string {

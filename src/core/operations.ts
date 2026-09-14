@@ -1,3 +1,4 @@
+import { sameCode } from './anchor';
 import type { StoreState } from './files';
 import { newId, newSessionId, nowIso } from './ids';
 import {
@@ -176,6 +177,7 @@ export function addThread(
     startLine: input.startLine,
     endLine: input.endLine,
     snippet: input.snippet,
+    original: input.snippet,
     languageId: input.languageId,
     status: 'open',
     createdAt: timestamp,
@@ -283,8 +285,19 @@ export function updateAnchor(
     return false;
   }
   const { thread } = found;
-  const sameSnippet =
-    thread.snippet.length === snippet.length && thread.snippet.every((l, i) => l === snippet[i]);
+  // Nothing moves unless the code at the new position is the SAME code, give or
+  // take indentation. The editor tracks a range through edits, but a range is
+  // not a claim about content: rewrite the region around it and it slides onto
+  // code the thread was never about. Following it there destroyed the only
+  // record of what was commented on and — worse — left the thread looking
+  // perfectly anchored forever after, because what it searches for is now
+  // exactly what sits there. When this refuses, the stored position simply goes
+  // stale until `reanchorAll` re-finds the code by content, or reports that it
+  // cannot.
+  if (!sameCode(thread.snippet, snippet)) {
+    return false;
+  }
+  const sameSnippet = thread.snippet.every((l, i) => l === snippet[i]);
   if (thread.startLine === startLine && thread.endLine === endLine && sameSnippet) {
     return false;
   }

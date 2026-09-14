@@ -43,6 +43,79 @@ for (const [name, raw] of Object.entries(lossy)) {
   check(`quarantines ${name}`, normalizeSession(raw, 'f').lossless === false);
 }
 
+// A thread whose code can no longer be found shows what it WAS about, since its
+// line numbers now point at whatever happens to occupy them.
+const { outdatedSnippetNotice } = require(__dirname + '/../out/core/export.js');
+const detached = (over = {}) => ({ path: 'src/a.ts', status: 'open', startLine: 1, endLine: 2,
+  snippet: ['const a = 1;', 'const b = 2;'], languageId: 'typescript', comments: [], ...over });
+check('an anchored thread gets no notice', outdatedSnippetNotice(detached()) === undefined);
+check('a detached thread shows its snippet',
+  outdatedSnippetNotice(detached({ outdated: true }))
+    .includes('> ```typescript\n> const a = 1;\n> const b = 2;\n> ```'));
+check('a resolved thread gets one too — it is the likeliest to have lost its code',
+  outdatedSnippetNotice(detached({ outdated: true, status: 'resolved' })) !== undefined);
+check('nothing is claimed when nothing was captured',
+  outdatedSnippetNotice(detached({ outdated: true, snippet: [] })) === undefined);
+check('a long snippet is truncated, and says so',
+  outdatedSnippetNotice(detached({ outdated: true, snippet: ['1', '2', '3', '4', '5'] }), 3)
+    .includes('… 2 more line(s) omitted'));
+check('a snippet containing a fence does not break out of the block',
+  outdatedSnippetNotice(detached({ outdated: true, snippet: ['md += ```;'] })).includes('> ````typescript'));
+// Quoted so it renders as one bordered block: context, not something the author
+// wrote. Checked through a real parser, since the `>` prefixing is easy to get
+// subtly wrong — a blank line without it silently ends the quote.
+{
+  const md = require(__dirname +
+    '/../node_modules/.pnpm/markdown-it@14.3.1/node_modules/markdown-it/dist/index.cjs.js')({ html: false });
+  const notice = outdatedSnippetNotice(detached({ outdated: true, snippet: ['const a = 1;', '', '  > not a quote'] }));
+  const html = md.render(notice + 'The comment itself.');
+  check('the notice renders as a single blockquote', html.split('<blockquote>').length === 2, html);
+  check('the code stays inside it',
+    /<blockquote>[\s\S]*<pre><code class="language-typescript">[\s\S]*<\/code><\/pre>[\s\S]*<\/blockquote>/.test(html));
+  check('a blank line does not end the quote early', html.includes('const a = 1;\n\n  &gt; not a quote'), html);
+  check('the comment is outside the quote', html.trimEnd().endsWith('<p>The comment itself.</p>'), html);
+}
+
+// An anchor only ever moves onto the SAME code, indentation aside. The editor's
+// tracked range slides onto whatever replaces a rewritten region, and following
+// it there destroyed the record of what the comment was about — while leaving
+// the thread looking perfectly anchored, since it then searched for exactly what
+// sat there.
+{
+  const base = ['  const a = 1;', '  const b = 2;', '  const c = 3;'];
+  const fresh = () => {
+    const st = { index: { version: 1 }, sessions: new Map(), sources: new Map(), readOnly: new Map() };
+    const s = ops.createSession(st, 'S');
+    const t = ops.addThread(st, s.id, { path: 'a.ts', startLine: 10, endLine: 12,
+      snippet: [...base], author: 'me', agent: false, body: 'note' });
+    return { st, t };
+  };
+  const at = (t) => `${t.startLine}-${t.endLine}`;
+  let { st, t } = fresh();
+  ops.updateAnchor(st, t.id, 20, 22, [...base]);
+  check('an anchor follows identical code', at(t) === '20-22', at(t));
+
+  ({ st, t } = fresh());
+  ops.updateAnchor(st, t.id, 20, 22, base.map((l) => '  ' + l));
+  check('and follows it through reindentation', at(t) === '20-22' && t.snippet[0] === '    const a = 1;', at(t));
+
+  ({ st, t } = fresh());
+  ops.updateAnchor(st, t.id, 20, 22, ['  const a = 1;', '  const b = 99;', '  const c = 3;']);
+  check('one edited line refuses the move', at(t) === '10-12' && t.snippet[1] === '  const b = 2;', at(t));
+
+  ({ st, t } = fresh());
+  ops.updateAnchor(st, t.id, 2932, 2934, ['  private async _resolveTools() {', '    const r = [];', '    const o = new Map();']);
+  check('a rewritten region never becomes the new snippet',
+    at(t) === '10-12' && t.snippet[0] === '  const a = 1;', JSON.stringify(t.snippet));
+
+  ({ st, t } = fresh());
+  ops.updateAnchor(st, t.id, 20, 21, base.slice(0, 2));
+  check('a collapsed range refuses the move', at(t) === '10-12', at(t));
+
+  check('the code a thread was opened on is frozen at creation',
+    JSON.stringify(t.original) === JSON.stringify(base), JSON.stringify(t.original));
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lr-core-'));
 const files = new ReviewFiles(root);
 

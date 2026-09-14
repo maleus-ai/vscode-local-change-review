@@ -11,6 +11,16 @@ function normalize(line: string): string {
   return line.trim().replace(/\s+/g, ' ');
 }
 
+/**
+ * Whether two blocks are the same code, allowing only indentation and internal
+ * spacing to differ. This is the bar for touching a thread's anchor: anything
+ * else is a different piece of code, and pointing a comment at it would be a
+ * guess dressed up as a fact.
+ */
+export function sameCode(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((line, i) => normalize(line) === normalize(b[i]));
+}
+
 function matchesAt(lines: string[], snippet: string[], start: number, loose: boolean): boolean {
   if (start < 0 || start + snippet.length > lines.length) {
     return false;
@@ -150,11 +160,10 @@ export function reanchorAll(state: StoreState, readLines: ReadLines, onlyPath?: 
         continue;
       }
       if (!lines) {
-        // File gone or unreadable: say so rather than guessing — unless the
-        // thread is resolved, in which case its code being gone is expected.
-        const flag = resolved ? undefined : true;
-        if (thread.outdated !== flag) {
-          thread.outdated = flag;
+        // File gone or unreadable: say so rather than guessing. Recorded for
+        // resolved threads too — see the not-found branch below.
+        if (thread.outdated !== true) {
+          thread.outdated = true;
           changed = true;
         }
         continue;
@@ -166,10 +175,14 @@ export function reanchorAll(state: StoreState, readLines: ReadLines, onlyPath?: 
         // clamp landed — the stored snippet is the only record of what was
         // commented on, and overwriting it with unrelated lines is unrecoverable.
         if (resolved) {
-          // Its code being gone is the point of resolving, so leave the thread
-          // entirely alone rather than moving it to the end of the file.
-          if (thread.outdated !== undefined) {
-            thread.outdated = undefined;
+          // Its position is left alone — a resolved thread has been dealt with
+          // and should not go wandering to the end of the file. But the flag is
+          // recorded rather than cleared: every consumer already lets `resolved`
+          // supersede `outdated` in what it *displays*, so clearing it here
+          // bought nothing and destroyed the one fact that explains why the
+          // thread is sitting on code it was never about.
+          if (thread.outdated !== true) {
+            thread.outdated = true;
             changed = true;
           }
           continue;

@@ -198,6 +198,7 @@ A session file:
       "startLine": 33,
       "endLine": 36,
       "snippet": ["export class AssistantBillingService {", "  constructor("],
+      "original": ["export class AssistantBillingService {", "  constructor("],
       "languageId": "typescript",
       "status": "open",
       "createdAt": "…",
@@ -214,7 +215,17 @@ A session file:
 from a person in the editor; it is absent on comments written before the flag
 existed, which is not the same as `false`.
 
-`path` is workspace-relative and POSIX-separated. `startLine`/`endLine` are **1-based and inclusive**. `snippet` is the source the comment was anchored to, captured (and refreshed) as you edit — so an export is readable without opening the file.
+`path` is workspace-relative and POSIX-separated. `startLine`/`endLine` are **1-based and inclusive**.
+
+`snippet` is the source the thread currently sits on. It is refreshed **only**
+when the code at the new position is the same code, indentation aside — an
+anchor never follows the editor's tracked range onto something else, because a
+range is not a claim about content. When the code can no longer be found the
+thread is marked `outdated`, keeps its last known position, and stops moving.
+
+`original` is what the thread was opened on, written once and never rewritten.
+It is what the editor and the exports show for an outdated thread, so a comment
+is still readable long after the code it was about has gone.
 
 Add `.local-review/` to `.gitignore` if you'd rather not commit reviews, or commit them if you want the history.
 
