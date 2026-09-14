@@ -75,6 +75,50 @@ const INLINE_MARKDOWN =
   /(\*\*|__)(.+?)\1|`([^`]+)`|!?\[([^\]]*)\]\([^)]*\)|(?<![*\w])(\*|_)(?!\s)(.+?)(?<!\s)\5(?![*\w])|~~(.+?)~~/g;
 
 /**
+ * Turns the newlines someone typed into ones Markdown will honour.
+ *
+ * Markdown folds a single newline into a space, so a comment written as three
+ * lines renders as one run-on paragraph — which is not what anyone means when
+ * they press Enter in a comment box. GitHub treats a newline in a comment as a
+ * hard break for the same reason, and this does it by appending the two trailing
+ * spaces that say so.
+ *
+ * Applied when rendering, never to what is stored: the body on disk stays
+ * exactly as it was typed, so exports, the MCP server and "Copy as Markdown"
+ * hand on the author's own text rather than ours.
+ */
+export function hardBreaks(body: string): string {
+  const lines = body.split(/\r?\n/);
+  let fence: string | undefined;
+  return lines
+    .map((line, index) => {
+      const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      if (fence !== undefined) {
+        if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
+          fence = undefined;
+        }
+        return line; // inside a code block, every character is the author's
+      }
+      if (marker) {
+        fence = marker;
+        return line;
+      }
+      const next = lines[index + 1];
+      // Only where a line genuinely runs into the next one. A blank line is
+      // already a paragraph break, and a break before a fence would render as a
+      // stray empty line above the code.
+      if (next === undefined || !next.trim() || !line.trim()) {
+        return line;
+      }
+      if (/^ {0,3}(`{3,}|~{3,})/.test(next)) {
+        return line;
+      }
+      return /\s$/.test(line) || line.endsWith('\\') ? line : `${line}  `;
+    })
+    .join('\n');
+}
+
+/**
  * First meaningful line of a Markdown body, with the inline syntax removed.
  *
  * Fenced blocks are skipped so a body that opens with code gets a label from

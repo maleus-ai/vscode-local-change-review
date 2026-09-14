@@ -8,7 +8,7 @@ import { currentAuthor } from './util';
 import type { ReviewStore } from './storage';
 import type { ReviewSessionData, ReviewThreadData } from './types';
 import { shownSnippet } from './core/export';
-import { summaryLine } from './core/format';
+import { hardBreaks, summaryLine } from './core/format';
 import { sessionUri, threadUri } from './decorations';
 import { formatTimestamp, lineLabel, relativeShort, relativeTime, resolvePath } from './util';
 
@@ -260,7 +260,7 @@ function threadTooltip(thread: ReviewThreadData): vscode.MarkdownString {
   }
   for (const comment of thread.comments) {
     md.appendMarkdown(
-      `\n**${comment.author}** · ${relativeTime(comment.createdAt)} · ${formatTimestamp(comment.createdAt)}\n\n${comment.body}\n`,
+      `\n**${comment.author}** · ${relativeTime(comment.createdAt)} · ${formatTimestamp(comment.createdAt)}\n\n${hardBreaks(comment.body)}\n`,
     );
   }
   return md;

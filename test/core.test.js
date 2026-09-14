@@ -116,6 +116,29 @@ check('a snippet containing a fence does not break out of the block',
     JSON.stringify(t.original) === JSON.stringify(base), JSON.stringify(t.original));
 }
 
+// A newline someone typed has to survive Markdown, which otherwise folds it into
+// a space and renders three lines as one run-on paragraph.
+{
+  const { hardBreaks } = require(__dirname + '/../out/core/format.js');
+  const md = require(__dirname +
+    '/../node_modules/.pnpm/markdown-it@14.3.1/node_modules/markdown-it/dist/index.cjs.js')({ html: false });
+  const typed = 'Why requestCompletion ?\nShouldn\'t it use generateObject ?\nWhat are the advantages ?';
+  check('a plain newline renders as a line break',
+    (md.render(hardBreaks(typed)).match(/<br>/g) || []).length === 2, md.render(hardBreaks(typed)));
+  check('a blank line is still a paragraph break, not a double break',
+    !hardBreaks('one\n\ntwo').includes('  '), JSON.stringify(hardBreaks('one\n\ntwo')));
+  check('the last line gets no trailing break', !hardBreaks('only one line').endsWith('  '));
+  check('a code block is left exactly as written',
+    hardBreaks('See:\n\n```ts\nconst a = 1;\nconst b = 2;\n```') ===
+      'See:\n\n```ts\nconst a = 1;\nconst b = 2;\n```');
+  check('no stray break is added right before a fence',
+    hardBreaks('See:\n```ts\nx\n```') === 'See:\n```ts\nx\n```', JSON.stringify(hardBreaks('See:\n```ts\nx\n```')));
+  check('a line already ending in a break is left alone',
+    hardBreaks('a  \nb') === 'a  \nb' && hardBreaks('a\\\nb') === 'a\\\nb');
+  check('an unclosed fence protects everything after it',
+    hardBreaks('```\nraw\nlines') === '```\nraw\nlines');
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lr-core-'));
 const files = new ReviewFiles(root);
 

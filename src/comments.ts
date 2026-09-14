@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 
 import { log } from './log';
 import { outdatedSnippetNotice, shownSnippet } from './core/export';
-import { splitLines } from './core/format';
+import { hardBreaks, splitLines } from './core/format';
 import { Identities } from './identities';
 import type { ReviewStore, ThreadLocation } from './storage';
 import type { ReviewSessionData, ReviewThreadData, ThreadStatus } from './types';
@@ -278,7 +278,7 @@ export class ReviewCommentsController implements vscode.Disposable {
         c.id,
         data.id,
         session.id,
-        new vscode.MarkdownString(prefix + c.body),
+        new vscode.MarkdownString(prefix + hardBreaks(c.body)),
         vscode.CommentMode.Preview,
         { name: this.identities.displayName(c.author), iconPath: this.identities.forAuthor(c.author) },
         new Date(c.updatedAt ?? c.createdAt),
@@ -607,7 +607,7 @@ export class ReviewCommentsController implements vscode.Disposable {
     }
     comment.mode = vscode.CommentMode.Preview;
     comment.savedBody = text;
-    comment.body = new vscode.MarkdownString(comment.displayPrefix + text);
+    comment.body = new vscode.MarkdownString(comment.displayPrefix + hardBreaks(text));
     if (live) {
       live.comments = [...live.comments];
     }
@@ -618,7 +618,7 @@ export class ReviewCommentsController implements vscode.Disposable {
 
   cancelEdit(comment: ReviewComment): void {
     const live = this.live.get(comment.threadId);
-    comment.body = new vscode.MarkdownString(comment.displayPrefix + comment.savedBody);
+    comment.body = new vscode.MarkdownString(comment.displayPrefix + hardBreaks(comment.savedBody));
     comment.mode = vscode.CommentMode.Preview;
     if (live) {
       live.comments = [...live.comments];
