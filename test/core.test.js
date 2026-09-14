@@ -137,6 +137,31 @@ check('a snippet containing a fence does not break out of the block',
     hardBreaks('a  \nb') === 'a  \nb' && hardBreaks('a\\\nb') === 'a\\\nb');
   check('an unclosed fence protects everything after it',
     hardBreaks('```\nraw\nlines') === '```\nraw\nlines');
+  check('a longer fence is not closed by a shorter one inside it',
+    hardBreaks('````\n```ts\nx = 1\n```\n````') === '````\n```ts\nx = 1\n```\n````');
+  check('a ~~~ fence protects its contents', hardBreaks('~~~\nx\ny\n~~~') === '~~~\nx\ny\n~~~');
+  check('a fence indented up to three spaces is still a fence',
+    hardBreaks('   ```\nx\ny\n   ```') === '   ```\nx\ny\n   ```');
+  // Quoted code is still code: the fence markers arrive behind a `>`, and
+  // missing that put two trailing spaces inside the author's code.
+  const quotedFence = '> Look:\n> ```ts\n> const a = 1;\n> const b = 2;\n> ```';
+  check('a fence inside a blockquote protects its contents', hardBreaks(quotedFence) === quotedFence,
+    JSON.stringify(hardBreaks(quotedFence)));
+  check('and the code comes out of the renderer untouched',
+    md.render(hardBreaks(quotedFence)).includes('const a = 1;\nconst b = 2;'),
+    md.render(hardBreaks(quotedFence)));
+  check('a blockquote of prose still breaks line by line',
+    (md.render(hardBreaks('> one\n> two\n> three')).match(/<br>/g) || []).length === 2);
+  // Indented code blocks are code too, and biased towards: a missed break is
+  // cosmetic, spaces inside code are not.
+  check('an indented code block is left alone',
+    hardBreaks('Example:\n\n    const a = 1;\n    const b = 2;\n\nDone\nhere.')
+      === 'Example:\n\n    const a = 1;\n    const b = 2;\n\nDone  \nhere.');
+  check('an indented code block inside a blockquote too',
+    hardBreaks('> Example:\n>\n>     const a = 1;\n>     const b = 2;')
+      === '> Example:\n>\n>     const a = 1;\n>     const b = 2;');
+  check('a four-space-indented line mid-paragraph is not code',
+    hardBreaks('prose\n    still prose\nmore') === 'prose  \n    still prose  \nmore');
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lr-core-'));

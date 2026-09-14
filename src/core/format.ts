@@ -87,12 +87,22 @@ const INLINE_MARKDOWN =
  * exactly as it was typed, so exports, the MCP server and "Copy as Markdown"
  * hand on the author's own text rather than ours.
  */
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/** Blockquote markers, so a fence or indented block inside one is still one. */
+const QUOTE = /^ {0,3}(?:> ?)+/;
+const INDENTED_CODE = /^(?: {4}|\t)/;
+
 export function hardBreaks(body: string): string {
   const lines = body.split(/\r?\n/);
+  const content = lines.map((line) => line.replace(QUOTE, ''));
   let fence: string | undefined;
+  let indentedCode = false;
+
   return lines
     .map((line, index) => {
-      const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      const here = content[index];
+      const marker = FENCE.exec(here)?.[1];
+
       if (fence !== undefined) {
         if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
           fence = undefined;
@@ -103,14 +113,24 @@ export function hardBreaks(body: string): string {
         fence = marker;
         return line;
       }
-      const next = lines[index + 1];
+      // An indented code block runs from a 4-space line that opens a block
+      // until something outdents. Erring towards "this is code" is the safe
+      // way round: the cost is a missing line break, not spaces inside code.
+      if (indentedCode) {
+        if (!here.trim() || INDENTED_CODE.test(here)) {
+          return line;
+        }
+        indentedCode = false;
+      } else if (INDENTED_CODE.test(here) && !content[index - 1]?.trim()) {
+        indentedCode = true;
+        return line;
+      }
+
+      const next = content[index + 1];
       // Only where a line genuinely runs into the next one. A blank line is
       // already a paragraph break, and a break before a fence would render as a
       // stray empty line above the code.
-      if (next === undefined || !next.trim() || !line.trim()) {
-        return line;
-      }
-      if (/^ {0,3}(`{3,}|~{3,})/.test(next)) {
+      if (next === undefined || !next.trim() || !here.trim() || FENCE.test(next)) {
         return line;
       }
       return /\s$/.test(line) || line.endsWith('\\') ? line : `${line}  `;
