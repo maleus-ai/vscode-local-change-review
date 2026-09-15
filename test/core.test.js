@@ -112,6 +112,31 @@ check('a snippet containing a fence does not break out of the block',
   ops.updateAnchor(st, t.id, 20, 21, base.slice(0, 2));
   check('a collapsed range refuses the move', at(t) === '10-12', at(t));
 
+  // The sequence behind "I have to reload the window before anything says
+  // outdated": the tracked range refuses to move, and until something then asks
+  // by content, nothing has noticed the thread came adrift.
+  {
+    const { reanchorAll } = require(__dirname + '/../out/core/anchor.js');
+    const fresh2 = () => {
+      const st2 = { index: { version: 1 }, sessions: new Map(), sources: new Map(), readOnly: new Map() };
+      const sess = ops.createSession(st2, 'S');
+      return { st2, t2: ops.addThread(st2, sess.id, { path: 'a.ts', startLine: 3, endLine: 3,
+        snippet: ['  const stuck = plugins.filter(p => !placed.has(p));'],
+        author: 'me', agent: false, body: 'note' }) };
+    };
+    const { st2, t2 } = fresh2();
+    const rewritten = ['x', 'y', '  const stuck = pick(plugins, placed);', 'z'];
+    check('range tracking alone never reports outdated',
+      ops.updateAnchor(st2, t2.id, 3, 3, [rewritten[2]]) === false && t2.outdated === undefined);
+    check('re-anchoring by content is what notices',
+      reanchorAll(st2, () => rewritten, { onlyPath: 'a.ts' }) === true && t2.outdated === true);
+    check('and the record of what it was about survives',
+      t2.snippet[0].includes('plugins.filter') && t2.original[0].includes('plugins.filter'));
+    check('it recovers if the code comes back',
+      reanchorAll(st2, () => ['x', 'y', '  const stuck = plugins.filter(p => !placed.has(p));', 'z'],
+        { onlyPath: 'a.ts' }) === true && t2.outdated === undefined);
+  }
+
   check('the code a thread was opened on is frozen at creation',
     JSON.stringify(t.original) === JSON.stringify(base), JSON.stringify(t.original));
 }

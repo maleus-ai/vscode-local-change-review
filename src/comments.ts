@@ -13,6 +13,7 @@ import {
   fromRange,
   languageIdFor,
   readLines,
+  readLinesSync,
   relPath,
   resolveAuthor,
   resolvePath,
@@ -423,8 +424,15 @@ export class ReviewCommentsController implements vscode.Disposable {
   }
 
   /**
-   * VS Code moves a thread's range as the document is edited; this writes that
-   * movement (and the new source lines) back to disk so exports stay truthful.
+   * Keeps the threads in one document honest as it is edited.
+   *
+   * Two steps, because they answer different questions. VS Code tracks a
+   * thread's range through edits, so the first writes that movement back — but
+   * only where the code at the new position is still the same code, and it says
+   * nothing at all when it refuses. The second asks the question the first
+   * cannot: is this thread's code still anywhere in the file? Without it a
+   * thread came adrift silently and only admitted it after a window reload,
+   * because nothing else re-anchors until the file is saved.
    */
   private async syncAnchors(document: vscode.TextDocument): Promise<void> {
     const key = document.uri.toString();
@@ -437,6 +445,15 @@ export class ReviewCommentsController implements vscode.Disposable {
       const { startLine, endLine } = fromRange(live.range);
       const snippet = lines.slice(startLine - 1, endLine);
       touched = this.store.updateAnchor(id, startLine, endLine, snippet) || touched;
+    }
+    // Only once the document has settled. A file an agent rewrote arrives here
+    // clean — VS Code reloads it and reports the change — which is the case that
+    // used to need a window reload before anything noticed. Mid-typing the
+    // document is dirty and its code is transiently half-written; flagging that
+    // outdated would pop the original-code banner open under the cursor on the
+    // first keystroke. Those edits are caught on save, which already re-anchors.
+    if (!document.isDirty) {
+      touched = this.store.reanchor(readLinesSync, relPath(document.uri)) || touched;
     }
     log('syncAnchors', { file: basename(document.uri), touched });
     if (touched) {

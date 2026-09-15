@@ -16,6 +16,7 @@ import {
 } from './export';
 import { disposeLog, initLog, log, showLog } from './log';
 import { PullRequestWatcher } from './prwatch';
+import { SourceWatcher } from './sourcewatch';
 import { ReviewStore, type ThreadLocation } from './storage';
 import { ReviewTreeProvider, type TreeNode } from './tree';
 import { UnreadTracker } from './unread';
@@ -58,8 +59,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // "19 minutes ago" is only true for a minute, so redraw the rows while the
   // panel is on screen.
+  // Re-anchors the threads in one file the moment it changes on disk, whoever
+  // changed it. Without this only an open document or a save announced itself,
+  // so a thread in a file an agent rewrote went on claiming to be anchored.
+  const sourceWatcher = new SourceWatcher((storedPath) => store.reanchor(readLinesSync, storedPath));
+  context.subscriptions.push(sourceWatcher);
+
   const clock = setInterval(() => {
     if (view.visible) {
+      // Only a fallback: the watcher covers this, except where a review is
+      // spread across more directories than it will watch.
+      if (!sourceWatcher.watching) {
+        store.reanchor(readLinesSync);
+      }
       tree.refresh();
     }
   }, 60_000);
@@ -84,6 +96,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const refreshUi = () => {
     tree.refresh();
     const sessions = store.allSessions;
+    sourceWatcher.update(sessions.flatMap((s) => s.threads.map((t) => t.path)));
     if (sessions.length > 0) {
       sawSessions = true;
     }
@@ -735,6 +748,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.onDidChangeWindowState((e) => {
       if (e.focused) {
         store.refreshFromDisk();
+        // And on any file rewritten meanwhile. Only open documents announce
+        // themselves; a thread in a file an agent edited while it was closed
+        // would otherwise go on claiming to be anchored.
+        store.reanchor(readLinesSync);
       }
     }),
     view.onDidChangeVisibility((e) => {

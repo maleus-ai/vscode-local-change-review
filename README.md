@@ -112,10 +112,10 @@ it is also the name the resolve rule keys off, so give each agent its own.
 
 | Tool                               | What it does                                                                                                              |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `list_sessions` / `create_session` | See sessions, start a new round                                                                                           |
+| `list_sessions` / `create_session` | See sessions (`active` flags the current one), start a new round                                                          |
 | `list_threads`                     | Threads with their comments; filter by `file`, `status`, `author`, `agent`, `needsReply`, and `compact` for one line each |
 | `get_thread`                       | One thread, including the source it is anchored to                                                                        |
-| `create_thread`                    | Open a thread on a line range                                                                                             |
+| `create_thread`                    | Open a thread on a line range — `sessionId` is **required**                                                               |
 | `add_comment`                      | Reply to a thread                                                                                                         |
 | `resolve_thread`                   | Close a thread — **only ones the agent opened itself**                                                                    |
 | `unresolve_thread`                 | Reopen any thread, with a comment saying why                                                                              |
@@ -131,6 +131,13 @@ Two rules shape it:
   agent that thinks an issue is not actually fixed should be able to say so.
   `unresolve_thread` requires a comment and posts it in the same step, so a thread
   never springs back open unexplained.
+- **The active session is yours, and an agent's new one does not take it.**
+  `create_session` activates only when nothing is active, and its result says
+  which happened — an agent that assumed otherwise filed a whole round of
+  findings into someone else's session without noticing.
+- **Every write names its session.** `create_thread` requires `sessionId` rather
+  than falling back to the active one, so a thread cannot land somewhere the
+  agent did not choose — including a session that became active while it worked.
 - **Line numbers are re-anchored on every read**, so they reflect the code as it is
   now rather than as it was when you wrote the comment.
 
@@ -349,9 +356,17 @@ behaviour is tuned through VS Code's own `comments.*` settings:
 ## Notes & limits
 
 - Sessions are stored under the **first** workspace folder. Files outside it are recorded by absolute path.
-- Thread anchors follow edits in the editor, and are re-found by content otherwise:
-  on startup, on save, on demand (**Re-anchor Comments to Current Code**) and on
-  every MCP read. A thread whose code can no longer be found anywhere in the file
-  is marked **outdated** rather than left pointing at whatever now occupies those
-  lines.
+- Thread paths are relative to the folder that *contains* the store, not to whoever
+  wrote them. That matters if you point a `.local-review` in a subdirectory at the
+  one in the repository root (a symlink is the usual way) so an agent running there
+  shares one review: the MCP server accepts paths relative to its own working
+  directory, but records them relative to the review, so both sides agree on what
+  `src/core/x.ts` means.
+- Thread anchors follow edits in the editor, and are re-found by content
+  otherwise: whenever a file with comments in it changes on disk (watched
+  per-directory, debounced), on startup, on save, on window focus, on demand
+  (**Re-anchor Comments to Current Code**) and on every MCP read. A thread whose
+  code can no longer be found anywhere in the file is marked **outdated** rather
+  than left pointing at whatever now occupies those lines — so a file rewritten
+  by an agent, in the editor or not, is noticed without reloading the window.
 - Editing `.local-review/**` from outside the editor is picked up automatically.

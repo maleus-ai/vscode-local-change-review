@@ -35,7 +35,11 @@ export function relPath(uri: vscode.Uri): string {
   const root = workspaceRoot();
   if (root && uri.scheme === root.scheme) {
     const rel = path.relative(root.fsPath, uri.fsPath);
-    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+    // Compared as path components: `..eslintrc.js` in the root is not an escape,
+    // and calling it one would store an absolute path for a file plainly inside
+    // the workspace.
+    const escapes = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+    if (rel && !escapes) {
       return toPosix(rel);
     }
   }

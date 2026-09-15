@@ -29,7 +29,61 @@ const STORAGE = arg('storage') ?? process.env.LOCAL_REVIEW_STORAGE ?? '.local-re
 /** Comments written through this server are attributed here. */
 const AUTHOR = arg('author') ?? process.env.LOCAL_REVIEW_AUTHOR ?? 'claude';
 
-const files = new ReviewFiles(path.resolve(ROOT, STORAGE));
+const STORE = path.resolve(ROOT, STORAGE);
+const files = new ReviewFiles(STORE);
+
+/**
+ * The directory the review is *about*, which is what stored paths are relative
+ * to — and not necessarily this server's working directory.
+ *
+ * Found by resolving the store through any symlinks and climbing back out by as
+ * many segments as the storage folder has. That matters because the store is
+ * the shared thing: point a `.local-review` in a subdirectory at the one in the
+ * repository root (a symlink is the obvious way) and two clients write to the
+ * same files while disagreeing about what `src/core/x.ts` means. Every thread
+ * one of them wrote then reads as outdated to the other, because the path
+ * resolves to nothing.
+ *
+ * With no symlink in play this is exactly ROOT, and nothing changes.
+ */
+const REVIEW_ROOT = (() => {
+  const depth = STORAGE.split(/[\\/]+/).filter((part) => part && part !== '.').length;
+  let root = realStore();
+  if (root === undefined) {
+    // No store yet, so there is nothing to disagree with.
+    try {
+      return fs.realpathSync(ROOT);
+    } catch {
+      return ROOT;
+    }
+  }
+  for (let i = 0; i < depth; i++) {
+    root = path.dirname(root);
+  }
+  return root;
+})();
+
+/**
+ * Where the store really lives, following a symlink even when its target does
+ * not exist yet. `realpathSync` gives up on a dangling one, which would answer
+ * "no store" on the first run and something different on the next — and the
+ * review root has to be the same answer every time.
+ */
+function realStore(): string | undefined {
+  try {
+    return fs.realpathSync(STORE);
+  } catch {
+    /* missing, or a symlink pointing at something not yet created */
+  }
+  try {
+    if (fs.lstatSync(STORE).isSymbolicLink()) {
+      return path.resolve(path.dirname(STORE), fs.readlinkSync(STORE));
+    }
+  } catch {
+    /* not a symlink either */
+  }
+  return undefined;
+}
 
 const REAL_ROOT = (() => {
   try {
@@ -39,36 +93,56 @@ const REAL_ROOT = (() => {
   }
 })();
 
-/**
- * The real path of `input`, or undefined when it is not inside the workspace.
- *
- * Resolved through `realpathSync` rather than compared as a string: a symlink
- * inside the workspace would otherwise pass a textual containment check and
- * still read — and persist — a file from anywhere on the machine.
- */
-function insideRoot(input: string): string | undefined {
-  const abs = path.resolve(ROOT, input);
-  let real: string;
+/** The real path of `input` resolved against `base`, symlinks and all. */
+function realPathOf(base: string, input: string): string | undefined {
+  const abs = path.resolve(base, input);
   try {
-    real = fs.realpathSync(abs);
+    return fs.realpathSync(abs);
   } catch {
     try {
-      real = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
+      // The file may not exist yet; its directory still has to.
+      return path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
     } catch {
       return undefined;
     }
   }
-  const rel = path.relative(REAL_ROOT, real);
+}
+
+/** Whether `real` is the review root or somewhere beneath it. */
+function withinReview(real: string): boolean {
+  const rel = path.relative(REVIEW_ROOT, real);
   // Compared as path components: `path.relative` returns `..eslintrc.js` for a
   // dotfile of that name sitting in the root, and a bare `startsWith('..')`
   // reads that as an escape. Only `..` alone or `../` is one.
-  const escapes = rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
-  return rel && !escapes ? real : undefined;
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+/**
+ * The real path of a file the caller named, or undefined when it is not inside
+ * the review.
+ *
+ * Tried against this server's working directory first, so an agent running in a
+ * subdirectory can name files the way it sees them, then against the review
+ * root, so paths copied out of the review itself work too. Resolved through
+ * `realpathSync` rather than compared as a string: a symlink inside the tree
+ * would otherwise pass a textual containment check and still read — and
+ * persist — a file from anywhere on the machine.
+ */
+function insideRoot(input: string): string | undefined {
+  for (const base of REAL_ROOT === REVIEW_ROOT ? [REAL_ROOT] : [REAL_ROOT, REVIEW_ROOT]) {
+    const real = realPathOf(base, input);
+    if (real && withinReview(real) && (base === REAL_ROOT || fs.existsSync(real))) {
+      return real;
+    }
+  }
+  return undefined;
 }
 
 const readLines: ReadLines = (stored) => {
-  const real = insideRoot(stored);
-  if (!real) {
+  // Resolved against the review root, never the working directory: a stored
+  // path is review-relative by definition.
+  const real = path.isAbsolute(stored) ? realPathOf('/', stored) : realPathOf(REVIEW_ROOT, stored);
+  if (!real || !withinReview(real)) {
     // Out of our reach is not the same as gone. A thread may legitimately be
     // anchored to an absolute path outside the workspace — the editor creates
     // those — and this server must not read there. Saying "unreadable" made
@@ -84,10 +158,14 @@ const readLines: ReadLines = (stored) => {
   }
 };
 
-/** Workspace-relative POSIX, or undefined for anything outside the workspace. */
+/**
+ * Relative to the review root, POSIX-separated, or undefined for anything
+ * outside the review. Never relative to this server's working directory: the
+ * store is shared, so the paths in it have to mean one thing.
+ */
 function toStoredPath(input: string): string | undefined {
   const real = insideRoot(input);
-  return real === undefined ? undefined : toPosix(path.relative(REAL_ROOT, real));
+  return real === undefined ? undefined : toPosix(path.relative(REVIEW_ROOT, real));
 }
 
 /**
@@ -229,7 +307,10 @@ server.registerTool(
     const state = readFresh();
     return text({
       activeSessionId: state.index.activeSessionId,
-      sessions: ops.allSessions(state).map(summariseSession),
+      sessions: ops.allSessions(state).map((session) => ({
+        ...summariseSession(session),
+        active: session.id === state.index.activeSessionId,
+      })),
     });
   },
 );
@@ -238,10 +319,27 @@ server.registerTool(
   'create_session',
   {
     title: 'Start a review session',
-    description: 'Starts a new review session and makes it active. Use this to begin a fresh round of review.',
+    description:
+      'Starts a new review session. It becomes the active one ONLY if no session was active — the active session belongs to the reviewer in the editor, and starting a round of your own does not take it from them. The result says which happened. Either way, pass the id it returns as `sessionId` on every create_thread.',
     inputSchema: { name: z.string().optional().describe('Human-readable name, e.g. "Round 2"') },
   },
-  async ({ name }) => text(summariseSession(files.transaction((s) => ops.createSession(s, name)).result)),
+  async ({ name }) => {
+    const { result, state } = files.transaction((s) => ops.createSession(s, name));
+    const active = state.index.activeSessionId === result.id;
+    const current = state.index.activeSessionId
+      ? state.sessions.get(state.index.activeSessionId)
+      : undefined;
+    return text({
+      ...summariseSession(result),
+      active,
+      // Spelled out because assuming otherwise is a silent, expensive mistake:
+      // every thread written without a sessionId would land somewhere else and
+      // read back as an empty session.
+      note: active
+        ? 'This session is now the active one, because nothing else was. Still pass sessionId on create_thread: the reviewer can change the active session at any moment.'
+        : `This session was NOT made active — ${current ? `"${current.name}" (${current.id})` : 'another session'} still is. Pass sessionId: "${result.id}" on every create_thread, or your threads will go somewhere else.`,
+    });
+  },
 );
 
 server.registerTool(
@@ -296,7 +394,7 @@ server.registerTool(
       // Refused, not answered with an empty list. `create_thread` already says
       // this, and reporting the same mistake as "there are no threads here"
       // reads as a fact about the review rather than about the argument.
-      return fail(`${file} is outside the workspace.`);
+      return fail(`${file} is outside the review (${REVIEW_ROOT}).`);
     }
     const wantedAuthor = author?.trim().toLowerCase();
     const threads = session.threads
@@ -341,7 +439,11 @@ server.registerTool(
       startLine: z.number().int().min(1),
       endLine: z.number().int().min(1),
       body: z.string().trim().min(1, 'body must not be empty').describe('The comment, in Markdown'),
-      sessionId: z.string().optional().describe('Defaults to the active session'),
+      sessionId: z
+        .string()
+        .describe(
+          'The session to file this thread in. Required, and deliberately so: defaulting to the active session meant a thread could land in one you did not choose — either because the session you had just created was never made active, or because the reviewer changed the active one while you were working. Use the id from create_session or list_sessions.',
+        ),
     },
   },
   async ({ file, startLine, endLine, body, sessionId }) => {
@@ -351,7 +453,7 @@ server.registerTool(
     const stored = toStoredPath(file);
     if (stored === undefined) {
       return fail(
-        `${file} is outside the workspace. Only files under the review's workspace root can be commented on.`,
+        `${file} is outside the review. Only files under ${REVIEW_ROOT} can be commented on.`,
       );
     }
     const lines = readLines(stored);
@@ -371,15 +473,11 @@ server.registerTool(
       return fail(`${stored}:${startLine}-${endLine} is blank; comment on a range with code in it.`);
     }
     const outcome = files.transaction((state) => {
-      // A pointer at a session that is gone or closed makes every default-scoped
-      // call dead-end: the `??` fallback never fires, because the id is a
-      // perfectly good string that simply does not resolve.
-      ops.reconcileActiveSession(state);
-      const id = sessionId ?? state.index.activeSessionId ?? ops.createSession(state).id;
-      const session = state.sessions.get(id);
+      const session = state.sessions.get(sessionId);
       if (!session) {
         return undefined;
       }
+      const id = session.id;
       const thread = ops.addThread(state, id, {
         path: stored,
         startLine,
@@ -393,7 +491,7 @@ server.registerTool(
       return thread ? { session, thread } : undefined;
     });
     if (!outcome.result) {
-      return fail(sessionId ? `No session ${sessionId}.` : 'Could not create the thread.');
+      return fail(`No session ${sessionId}. Call list_sessions to see which ids exist.`);
     }
     return text(summariseThread(outcome.result.session, outcome.result.thread));
   },
@@ -535,7 +633,7 @@ server.registerTool(
     if (file) {
       const stored = toStoredPath(file);
       if (stored === undefined) {
-        return fail(`${file} is outside the workspace.`);
+        return fail(`${file} is outside the review (${REVIEW_ROOT}).`);
       }
       return text(fileToMarkdown(session, stored, options));
     }

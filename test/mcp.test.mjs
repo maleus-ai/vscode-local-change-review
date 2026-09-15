@@ -38,15 +38,31 @@ check('the first session becomes active',
   J(await client.callTool({ name: 'list_sessions', arguments: {} })).activeSessionId === session.id);
 
 // An agent starting a second session must not redirect where the reviewer's own
-// next comment lands.
+// next comment lands — and it has to be TOLD that, because assuming otherwise
+// files every later thread into someone else's session, silently.
+check('the first session reports that it became active', session.active === true, JSON.stringify(session.note));
 const second = J(await client.callTool({ name: 'create_session', arguments: { name: 'Agent findings' } }));
 check('a second session does not steal the active one',
   J(await client.callTool({ name: 'list_sessions', arguments: {} })).activeSessionId === session.id);
+check('and says so, naming itself as the id to pass',
+  second.active === false && second.note.includes(second.id) && second.note.includes('Round 1'),
+  JSON.stringify(second.note));
+check('list_sessions flags which one is active',
+  J(await client.callTool({ name: 'list_sessions', arguments: {} }))
+    .sessions.filter((s) => s.active).map((s) => s.id).join() === session.id);
+check('create_thread without a session is refused, not guessed',
+  (await client.callTool({ name: 'create_thread', arguments: {
+    file: 'src/billing.ts', startLine: 1, endLine: 1, body: 'no session' } })).isError === true);
+check('and an unknown session id says which call would list them',
+  (await client.callTool({ name: 'create_thread', arguments: {
+    sessionId: 'session-nope', file: 'src/billing.ts', startLine: 1, endLine: 1, body: 'x' } }))
+    .content[0].text.includes('list_sessions'));
 check('but can still be targeted by id',
   J(await client.callTool({ name: 'list_threads', arguments: { sessionId: second.id, status: 'all' } })).session.name === 'Agent findings');
 
 const created = J(await client.callTool({ name: 'create_thread', arguments: {
-  file: 'src/billing.ts', startLine: 3, endLine: 4, body: 'This writes through the repo, not the service.' } }));
+  sessionId: session.id, file: 'src/billing.ts', startLine: 3, endLine: 4,
+  body: 'This writes through the repo, not the service.' } }));
 check('thread created', created.file === 'src/billing.ts' && created.startLine === 3, JSON.stringify(created.threadId));
 
 await client.callTool({ name: 'add_comment', arguments: { threadId: created.threadId, body: 'Second thought.' } });
@@ -145,7 +161,8 @@ check('export_markdown on an outside file is refused',
 fs.writeFileSync(path.join(root, '..eslintrc.js'), 'module.exports = {};\n');
 check('a dotfile whose name starts with two dots is inside the workspace',
   J(await client.callTool({ name: 'create_thread', arguments: {
-    file: '..eslintrc.js', startLine: 1, endLine: 1, body: 'config lives here' } })).file === '..eslintrc.js');
+    sessionId: session.id, file: '..eslintrc.js', startLine: 1, endLine: 1,
+    body: 'config lives here' } })).file === '..eslintrc.js');
 
 // --- a thread anchored outside the workspace: unreachable is not "gone"
 const outside = path.join(os.tmpdir(), `lr-shared-${process.pid}.ts`);
@@ -207,7 +224,7 @@ check('a quarantined session does not break reads of a healthy one', stillReads.
       === "const GONE = 'nowhere';");
   fs.writeFileSync(path.join(root, 'src', 'anchored.ts'), 'export const kept = 1;\n');
   const live = J(await client.callTool({ name: 'create_thread', arguments: {
-    file: 'src/anchored.ts', startLine: 1, endLine: 1, body: 'still here' } }));
+    sessionId: session.id, file: 'src/anchored.ts', startLine: 1, endLine: 1, body: 'still here' } }));
   check('an anchored thread carries no original block',
     J(await client.callTool({ name: 'get_thread', arguments: { threadId: live.threadId } })).original === undefined);
 
@@ -220,6 +237,57 @@ check('a quarantined session does not break reads of a healthy one', stillReads.
 }
 
 await client.close();
+
+// --- a store shared between two roots: an agent running in a subdirectory must
+//     write paths the editor at the repository root can still resolve. Without
+//     this every thread it wrote read as outdated to everyone else.
+{
+  const mono = fs.mkdtempSync(path.join(os.tmpdir(), 'lr-mono-'));
+  fs.mkdirSync(path.join(mono, 'libs', 'sdk', 'src', 'core'), { recursive: true });
+  fs.mkdirSync(path.join(mono, 'src', 'auth'), { recursive: true });
+  fs.mkdirSync(path.join(mono, '.local-review', 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(mono, 'libs', 'sdk', 'src', 'core', 'caps.ts'), 'export const a = 1;\n');
+  fs.writeFileSync(path.join(mono, 'src', 'auth', 'index.ts'), 'export const auth = 1;\n');
+  fs.symlinkSync(path.join('..', '..', '.local-review'), path.join(mono, 'libs', 'sdk', '.local-review'));
+
+  const sub = new Client({ name: 'sub', version: '1' });
+  await sub.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(HERE, '..', 'out', 'mcp', 'server.js')],
+    cwd: path.join(mono, 'libs', 'sdk'),
+  }));
+  const subSession = J(await sub.callTool({ name: 'create_session', arguments: { name: 'Sub' } }));
+
+  const asAgentSees = J(await sub.callTool({ name: 'create_thread', arguments: {
+    sessionId: subSession.id, file: 'src/core/caps.ts', startLine: 1, endLine: 1, body: 'named from the subdirectory' } }));
+  check('a path relative to the agent is stored relative to the review',
+    asAgentSees.file === 'libs/sdk/src/core/caps.ts', asAgentSees.file ?? JSON.stringify(asAgentSees));
+
+  const asReviewSees = J(await sub.callTool({ name: 'create_thread', arguments: {
+    sessionId: subSession.id, file: 'libs/sdk/src/core/caps.ts', startLine: 1, endLine: 1, body: 'named from the root' } }));
+  check('and a path relative to the review resolves to the same file',
+    asReviewSees.file === 'libs/sdk/src/core/caps.ts', asReviewSees.file ?? JSON.stringify(asReviewSees));
+
+  const sibling = J(await sub.callTool({ name: 'create_thread', arguments: {
+    sessionId: subSession.id, file: '../../src/auth/index.ts', startLine: 1, endLine: 1, body: 'a sibling package' } }));
+  check('a sibling package inside the review is reachable', sibling.file === 'src/auth/index.ts',
+    sibling.file ?? JSON.stringify(sibling));
+
+  check('but nothing outside the review is',
+    (await sub.callTool({ name: 'create_thread', arguments: {
+      sessionId: subSession.id, file: '/etc/passwd', startLine: 1, endLine: 1, body: 'nope' } })).isError === true);
+
+  const listed = J(await sub.callTool({ name: 'list_threads', arguments: {} }));
+  check('none of them read as outdated', listed.threads.every((t) => t.outdated === false),
+    JSON.stringify(listed.threads.map((t) => [t.file, t.outdated])));
+  check('and the store really is the shared one',
+    fs.existsSync(path.join(mono, '.local-review', 'sessions')) &&
+    fs.readdirSync(path.join(mono, '.local-review', 'sessions')).length > 0);
+
+  await sub.close();
+  fs.rmSync(mono, { recursive: true, force: true });
+}
+
 fs.rmSync(outside, { force: true });
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
