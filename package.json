@@ -968,8 +968,9 @@
     "lint": "tsc -p ./ --noEmit",
     "package": "vsce package --no-dependencies",
     "reinstall": "pnpm run package && code --install-extension \"$(ls -t *.vsix | head -1)\" --force",
+    "install:mcp": "node ./scripts/install-mcp.mjs",
     "mcp": "node ./out/mcp/server.js",
-    "test": "pnpm run compile && node test/lock.test.js && node test/core.test.js && node test/anchor.test.js && node test/unread.test.js && node test/sourcewatch.test.js && node test/mcp.test.mjs"
+    "test": "pnpm run compile && node test/lock.test.js && node test/core.test.js && node test/anchor.test.js && node test/unread.test.js && node test/sourcewatch.test.js && node test/mcp.test.mjs && node test/install-mcp.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

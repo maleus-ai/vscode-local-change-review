@@ -293,7 +293,13 @@ function summariseThread(session: ReviewSessionData, thread: ReviewThreadData) {
   };
 }
 
-const server = new McpServer({ name: 'local-review', version: '0.6.0' });
+const server = new McpServer(
+  { name: 'local-review', version: '0.6.0' },
+  {
+    instructions:
+      'Use this server whenever the user mentions local review comments, asks to check or respond to a comment, or requests a local code review. To find comments awaiting you, call list_threads with needsReply: true; use get_thread when more context is needed, then add_comment to reply. Prefer these tools over reading or editing .local-review files directly. Do not resolve reviewer-authored threads; resolution is the reviewer\'s decision.',
+  },
+);
 
 server.registerTool(
   'list_sessions',

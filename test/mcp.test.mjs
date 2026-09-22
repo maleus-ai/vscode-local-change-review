@@ -28,6 +28,15 @@ await client.connect(new StdioClientTransport({
   args: [path.join(HERE, '..', 'out', 'mcp', 'server.js'), '--root', root],
 }));
 
+const instructions = client.getInstructions() ?? '';
+check('server instructions identify local review comment requests',
+  instructions.includes('local review comments') && instructions.length <= 512,
+  instructions);
+check('server instructions explain how to find and answer comments',
+  instructions.includes('list_threads') && instructions.includes('needsReply: true') &&
+    instructions.includes('add_comment'),
+  instructions);
+
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 check('tools advertised', tools.length === 9, tools.join(', '));
 

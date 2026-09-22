@@ -24,82 +24,31 @@ open its own, and export — while you keep control of what counts as resolved.
 
 ### Install
 
-Build it once:
+Install the dependencies, then run the interactive installer:
 
 ```bash
-pnpm install && pnpm run compile
+pnpm install
+pnpm run install:mcp
 ```
 
-Everything below points at `out/mcp/server.js` by **absolute path**. That matters:
-the server takes its *workspace* from the directory the client runs it in, so one
-build serves every repository, and a repository you never review gets no
-`.local-review/` folder created.
+It asks separately about Claude Code, Codex, and Gemini CLI, builds the server,
+and registers each selected harness at **user scope**. Rerunning it updates that
+harness's existing user-level `local-review` entry. The selected harness CLIs
+and `pnpm` must be available on `PATH`.
 
-For brevity, `SERVER` below means
-`/absolute/path/to/local-change-review/out/mcp/server.js`.
+The installed entry points at `out/mcp/server.js` by **absolute path**, so keep
+this checkout where it is after installing. The server takes its *workspace*
+from the directory the harness runs it in: one build serves every repository,
+and a repository you never review gets no `.local-review/` folder.
 
-#### Claude Code
-
-```bash
-claude mcp add --scope user local-review -- node SERVER      # every repository
-claude mcp add local-review -- node SERVER                   # this repository only
-```
-
-Then **restart Claude Code and approve the server** when it asks. Until you do,
-`claude mcp list` shows `⏸ Pending approval` and no tools appear —
-`claude mcp reset-project-choices` makes it ask again if you declined by accident.
-Working inside this repository, the bundled `.mcp.json` already registers it, so
-only the approval applies.
-
-#### Codex
-
-```bash
-codex mcp add local-review --env LOCAL_REVIEW_AUTHOR=codex -- node SERVER
-```
-
-Codex keeps MCP servers in `~/.codex/config.toml`, so this is always user-level:
-
-```toml
-[mcp_servers.local-review]
-command = "node"
-args = ["/absolute/path/to/local-change-review/out/mcp/server.js"]
-env = { LOCAL_REVIEW_AUTHOR = "codex" }
-```
-
-#### Gemini CLI
-
-```bash
-gemini mcp add -s user  -e LOCAL_REVIEW_AUTHOR=gemini local-review node SERVER
-gemini mcp add -s project -e LOCAL_REVIEW_AUTHOR=gemini local-review node SERVER
-```
-
-`-s project` is the default. The two scopes write `~/.gemini/settings.json` and
-`.gemini/settings.json` respectively, both under an `mcpServers` key in the shape
-shown below.
-
-#### Cursor
-
-Cursor reads `~/.cursor/mcp.json` for every project and `.cursor/mcp.json` for one,
-using the same shape:
-
-```json
-{
-  "mcpServers": {
-    "local-review": {
-      "command": "node",
-      "args": ["/absolute/path/to/local-change-review/out/mcp/server.js"],
-      "env": { "LOCAL_REVIEW_AUTHOR": "cursor" }
-    }
-  }
-}
-```
+Restart each selected harness afterward. Claude Code may also ask you to approve
+the server; until approved, its tools will not appear.
 
 #### Anything else
 
-Most clients take that same `mcpServers` block; put it in the client's global
-config for every project, or its per-project config for one. VS Code's own agent
-mode is the notable exception — it uses `.vscode/mcp.json` with a `servers` key
-rather than `mcpServers`.
+The installer currently supports Claude Code, Codex, and Gemini CLI. Other
+clients generally accept an `mcpServers` entry in their global configuration;
+VS Code's own agent mode is the notable exception and uses a `servers` key.
 
 The server speaks MCP over stdio, so there is no port and nothing to discover: the
 client starts the process, and the editor picks up whatever it writes through the
