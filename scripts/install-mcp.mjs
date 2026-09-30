@@ -21,9 +21,10 @@ const harnesses = [
       "add",
       "--scope",
       "user",
+      // Claude's variadic --env option would consume a following server name.
+      serverName,
       "--env",
       "LOCAL_REVIEW_AUTHOR=claude",
-      serverName,
       "--",
       "node",
       server,

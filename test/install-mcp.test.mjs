@@ -14,6 +14,19 @@ const log = join(temporary, "calls.jsonl");
 const fakeCli = `#!${process.execPath}
 const { appendFileSync } = require("node:fs");
 const { basename } = require("node:path");
+const args = process.argv.slice(2);
+if (basename(process.argv[1]) === "claude" && args[1] === "add") {
+  const envIndex = args.indexOf("--env");
+  if (envIndex !== -1) {
+    for (const value of args.slice(envIndex + 1)) {
+      if (value.startsWith("-")) break;
+      if (!/^[^=]+=/.test(value)) {
+        console.error("Invalid environment variable format: " + value);
+        process.exit(1);
+      }
+    }
+  }
+}
 appendFileSync(process.env.LOCAL_REVIEW_INSTALLER_TEST_LOG, JSON.stringify({
   command: basename(process.argv[1]), args: process.argv.slice(2),
 }) + "\\n");
@@ -54,8 +67,8 @@ const additions = Object.fromEntries(
 );
 
 assert.deepEqual(additions.claude, [
-  "mcp", "add", "--scope", "user", "--env", "LOCAL_REVIEW_AUTHOR=claude",
-  "local-review", "--", "node", server,
+  "mcp", "add", "--scope", "user", "local-review", "--env",
+  "LOCAL_REVIEW_AUTHOR=claude", "--", "node", server,
 ]);
 assert.deepEqual(additions.codex, [
   "mcp", "add", "local-review", "--env", "LOCAL_REVIEW_AUTHOR=codex",
